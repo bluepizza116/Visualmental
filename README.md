@@ -75,8 +75,26 @@ The UI also fades out on its own after a few seconds of no input.
 
 ## Deploying
 
-Prism is one static file, so hosting it is a copy. `deploy/` targets a VPS
-running Caddy:
+Prism is one static file, so hosting it is a copy. `deploy/` targets a server
+running Caddy, and works either from your machine over SSH or directly on the
+server itself.
+
+**On the server** (you're already logged in — no SSH needed):
+
+```sh
+apt-get install -y git
+git clone https://github.com/bluepizza116/Visualmental.git /opt/visualmental
+cd /opt/visualmental
+./deploy/deploy.sh --local --with-caddy
+```
+
+Updating later:
+
+```sh
+cd /opt/visualmental && git pull && ./deploy/deploy.sh --local
+```
+
+**From your own machine**, over SSH:
 
 ```sh
 ./deploy/deploy.sh --dry-run --with-caddy   # see exactly what it will do
@@ -84,8 +102,9 @@ running Caddy:
 ./deploy/deploy.sh                          # every deploy after: page only
 ```
 
-It uses your existing SSH access — nothing secret lives in this repo. Defaults
-are overridable:
+`--dry-run` prints every command without running any of them, and works with
+either mode. SSH mode uses your existing access — nothing secret lives in this
+repo. Defaults are overridable:
 
 | Variable | Default |
 | --- | --- |
@@ -98,7 +117,9 @@ are overridable:
 `--with-caddy` installs `deploy/Caddyfile` as its own file under `SITES_DIR`
 rather than replacing your existing config, adds the `import` line only if it's
 missing (backing up the original first), and runs `caddy validate` before
-reloading — a broken config won't take the server down.
+reloading — a broken config won't take the server down. It refuses up front if
+Caddy isn't installed, so a failure can't leave your config half-edited.
+Re-running it is safe: the import line and backup are only made once.
 
 The nip.io hostname resolves to the embedded IP, so Caddy gets a real Let's
 Encrypt certificate over HTTP-01 with no DNS setup. Ports 80 and 443 need to be

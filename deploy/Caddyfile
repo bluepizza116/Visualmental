@@ -1,10 +1,11 @@
 # Caddy site config for Prism.
 #
-# __DOMAIN__   is replaced by deploy.sh (default: visualmental.163-245-220-226.nip.io)
-# __WEB_ROOT__ is replaced by deploy.sh (default: /var/www/visualmental)
+# A template: deploy.sh fills in the domain and web root below, then installs
+# the result as /etc/caddy/sites/visualmental.caddyfile. It is imported by your
+# main Caddyfile and does not replace it.
 #
-# Installed to /etc/caddy/sites/visualmental.caddyfile — it does not replace
-# your existing Caddyfile.
+# Defaults are visualmental.163-245-220-226.nip.io and /var/www/visualmental;
+# override with the DOMAIN and WEB_ROOT environment variables.
 
 __DOMAIN__ {
 	root * __WEB_ROOT__
