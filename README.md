@@ -73,6 +73,44 @@ settings around. `🎲` randomizes the whole look.
 
 The UI also fades out on its own after a few seconds of no input.
 
+## Deploying
+
+Prism is one static file, so hosting it is a copy. `deploy/` targets a VPS
+running Caddy:
+
+```sh
+./deploy/deploy.sh --dry-run --with-caddy   # see exactly what it will do
+./deploy/deploy.sh --with-caddy             # first deploy: page + site config
+./deploy/deploy.sh                          # every deploy after: page only
+```
+
+It uses your existing SSH access — nothing secret lives in this repo. Defaults
+are overridable:
+
+| Variable | Default |
+| --- | --- |
+| `SSH_HOST` | `root@163.245.220.226` |
+| `DOMAIN` | `visualmental.163-245-220-226.nip.io` |
+| `WEB_ROOT` | `/var/www/visualmental` |
+| `SITES_DIR` | `/etc/caddy/sites` |
+| `MAIN_CADDYFILE` | `/etc/caddy/Caddyfile` |
+
+`--with-caddy` installs `deploy/Caddyfile` as its own file under `SITES_DIR`
+rather than replacing your existing config, adds the `import` line only if it's
+missing (backing up the original first), and runs `caddy validate` before
+reloading — a broken config won't take the server down.
+
+The nip.io hostname resolves to the embedded IP, so Caddy gets a real Let's
+Encrypt certificate over HTTP-01 with no DNS setup. Ports 80 and 443 need to be
+open. HTTPS isn't just polish here: **microphone and tab capture require a
+secure context**, so they won't work over plain HTTP.
+
+The site config sets a CSP tight enough to match the app exactly
+(`default-src 'none'`, inline script/style, `blob:` for audio and artwork) and a
+`Permissions-Policy` that grants `microphone` and `display-capture` — a
+restrictive default would silently break two of the three audio sources. Both
+were verified by serving the page under those exact headers.
+
 ## Notes
 
 - Tab audio capture needs Chrome or Edge; Firefox and Safari don't offer

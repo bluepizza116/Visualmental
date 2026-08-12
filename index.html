@@ -671,6 +671,8 @@ const rgb2hex = c => '#' + [c.r, c.g, c.b].map(v => clamp(Math.round(v), 0, 255)
  * area it covers *and* how vivid it is, then greedily pick well-separated
  * winners so the palette isn't five shades of the same brown.
  */
+const FALLBACK_PALETTE = [{ r: 124, g: 92, b: 255 }, { r: 0, g: 212, b: 255 }, { r: 255, g: 77, b: 141 }];
+
 function extractPalette(img, count = 6) {
   const S = 72;
   const c = document.createElement('canvas');
@@ -679,7 +681,7 @@ function extractPalette(img, count = 6) {
   g.drawImage(img, 0, 0, S, S);
   let px;
   try { px = g.getImageData(0, 0, S, S).data; }
-  catch { return [{ r: 124, g: 92, b: 255 }, { r: 0, g: 212, b: 255 }, { r: 255, g: 77, b: 141 }]; }
+  catch { return FALLBACK_PALETTE.slice(); }
 
   const buckets = new Map();
   for (let i = 0; i < px.length; i += 4) {
@@ -691,6 +693,9 @@ function extractPalette(img, count = 6) {
     if (!e) buckets.set(key, e = { r: 0, g: 0, b: 0, n: 0 });
     e.r += r; e.g += gg; e.b += b; e.n++;
   }
+
+  // A fully transparent or empty image yields no buckets at all.
+  if (!buckets.size) return FALLBACK_PALETTE.slice();
 
   const cand = [];
   for (const e of buckets.values()) {
@@ -717,7 +722,17 @@ function extractPalette(img, count = 6) {
       out.push({ r, g: g2, b });
     }
   }
-  return out.map(o => ({ r: o.r, g: o.g, b: o.b }));
+  // Covers often win a bucket with a near-black or washed-out backdrop color.
+  // Faithful, but unreadable as a bar against a dark stage — so lift only the
+  // colors that would disappear, keeping their hue intact.
+  return out.map(o => {
+    let [h, s, l] = rgb2hsl(o.r, o.g, o.b);
+    if (l < 0.34) l = 0.46;
+    else if (l > 0.93) l = 0.86;
+    if (s < 0.22) s = 0.34;
+    const [r, g, b] = hsl2rgb(h, s, l);
+    return { r, g, b };
+  });
 }
 
 function paletteStops() {

@@ -1,0 +1,46 @@
+# Caddy site config for Prism.
+#
+# __DOMAIN__   is replaced by deploy.sh (default: visualmental.163-245-220-226.nip.io)
+# __WEB_ROOT__ is replaced by deploy.sh (default: /var/www/visualmental)
+#
+# Installed to /etc/caddy/sites/visualmental.caddyfile — it does not replace
+# your existing Caddyfile.
+
+__DOMAIN__ {
+	root * __WEB_ROOT__
+	file_server
+	encode zstd gzip
+
+	header {
+		# Prism is entirely self-contained — no CDNs, no fonts, no network calls —
+		# so everything can be locked to 'self'. The inline allowances are needed
+		# because the whole app is one <style> and one <script> in index.html.
+		Content-Security-Policy "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+		# The mic and tab-capture sources need these explicitly granted; a
+		# restrictive default would silently break two of the three inputs.
+		Permissions-Policy "microphone=(self), display-capture=(self), fullscreen=(self), camera=(), geolocation=()"
+
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+
+		# Deliberately short: this is an IP-derived nip.io host, so a year-long
+		# pin would be painful if you ever need to serve it over plain HTTP.
+		Strict-Transport-Security "max-age=2592000"
+
+		-Server
+	}
+
+	# The app is a single file that changes on every deploy, so it must not be
+	# cached; any assets you add later are safe to cache hard.
+	header /index.html Cache-Control "no-cache, must-revalidate"
+	@assets path *.png *.jpg *.jpeg *.svg *.webp *.woff2 *.ico
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	log {
+		output file /var/log/caddy/visualmental.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}
