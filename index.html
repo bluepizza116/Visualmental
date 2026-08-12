@@ -270,7 +270,16 @@ const DEFAULTS = {
   bgMode: 'cover', bgBlur: 46, bgDim: 0.66, vignette: 0.5,
   // overlays
   showCover: true, showInfo: true,
+
+  // player skin — an independent layer drawn over whichever spectrum mode is active
+  skin: 'none',                 // none | vinyl | cd | tape
+  skinSize: 1, skinOpacity: 1, skinDim: 0.35,
+  vinylCondition: 0.85, vinylRPM: 33, tonearm: true, vinylLabelArt: true,
+  cdSpin: 1, cdSheen: 0.65, cdArt: true,
+  tapeQuality: 0.8, tapeSpin: 1,
 };
+
+const SKINS = [['none', 'None'], ['vinyl', 'Vinyl turntable'], ['cd', 'CD'], ['tape', 'Cassette']];
 
 const SCHEMA = [
   { title: 'Mode', open: true, items: [
@@ -281,6 +290,26 @@ const SCHEMA = [
     { k: 'lineWidth',   t: 'range', label: 'Line weight', min: 1, max: 14,  step: .5,  show: c => ['wave','blob','rings'].includes(c.mode) },
     { k: 'particles',     t: 'range', label: 'Particles', min: 0, max: 2000, step: 10, show: c => c.mode === 'particles' },
     { k: 'particleSpeed', t: 'range', label: 'Speed',     min: .1, max: 4, step: .05,  show: c => c.mode === 'particles' },
+  ]},
+  { title: 'Player skin', open: true, items: [
+    { k: 'skin', t: 'select', label: 'Surface', options: SKINS },
+    { k: 'skinSize',    t: 'range', label: 'Size',    min: .4, max: 1.6, step: .01, show: c => c.skin !== 'none' },
+    { k: 'skinOpacity', t: 'range', label: 'Opacity', min: .15, max: 1, step: .01, show: c => c.skin !== 'none' },
+    { k: 'skinDim',     t: 'range', label: 'Dim viz', min: 0, max: 1, step: .01,   show: c => c.skin !== 'none' },
+
+    { k: 'vinylCondition', t: 'range',  label: 'Condition', min: 0, max: 1, step: .01, show: c => c.skin === 'vinyl' },
+    { k: 'vinylRPM',       t: 'select', label: 'Speed',     options: [[33,'33⅓ RPM'],[45,'45 RPM'],[78,'78 RPM']], show: c => c.skin === 'vinyl' },
+    { k: 'tonearm',        t: 'toggle', label: 'Tonearm',   show: c => c.skin === 'vinyl' },
+    { k: 'vinylLabelArt',  t: 'toggle', label: 'Art on label', show: c => c.skin === 'vinyl' },
+    { k: '_scratchhint',   t: 'note',   label: 'Drag the record to scratch; flick to spin it.', show: c => c.skin === 'vinyl' },
+
+    { k: 'cdSpin',  t: 'range',  label: 'Spin',   min: 0, max: 3, step: .01, show: c => c.skin === 'cd' },
+    { k: 'cdSheen', t: 'range',  label: 'Sheen',  min: 0, max: 1, step: .01, show: c => c.skin === 'cd' },
+    { k: 'cdArt',   t: 'toggle', label: 'Album art', show: c => c.skin === 'cd' },
+
+    { k: 'tapeQuality', t: 'range', label: 'Tape quality', min: 0, max: 1, step: .01, show: c => c.skin === 'tape' },
+    { k: 'tapeSpin',    t: 'range', label: 'Reel speed',   min: 0, max: 3, step: .01, show: c => c.skin === 'tape' },
+    { k: '_rec',        t: 'record', show: c => c.skin === 'tape' },
   ]},
   { title: 'Bars', open: true, show: c => ['bars','radial'].includes(c.mode), items: [
     { k: 'barCount',  t: 'range',  label: 'Count',      min: 12, max: 256, step: 1 },
@@ -356,6 +385,13 @@ const state = {
   peaks: new Float32Array(512),
   peakV: new Float32Array(512),
   levelL: 0, levelR: 0,
+  file: null,                    // the File itself, so the turntable can decode it
+  discAngle: 0, reelAngle: 0, cdAngle: 0,
+  rate: 1,                       // effective playback rate, drives the platter
+  grab: null,                    // live scratch gesture
+  spinDown: 0,                   // momentum left over from a flick
+  dust: null,
+  recording: false, annotation: null, annotationURL: null,
   parts: [],
   shocks: [],
 };
@@ -495,6 +531,295 @@ function syncSourceUI() {
   const isFile = k === 'file';
   $('#btnPlay').disabled = !isFile;
   $('#seek').disabled = !isFile;
+}
+
+/* --------------------------------------------------- turntable engine ----- */
+/* An <audio> element cannot play backwards — playbackRate is positive-only —
+   so DJ scratching is impossible with it. The vinyl and tape skins instead run
+   the decoded samples through an AudioWorklet that walks a playhead at a
+   signed, fractional rate. That also gives wow/flutter for free: the rate is an
+   a-rate AudioParam, so an LFO can just be connected to it. */
+
+const WORKLET_SRC = `
+class Turntable extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [{ name: 'rate', defaultValue: 1, minValue: -8, maxValue: 8, automationRate: 'a-rate' }];
+  }
+  constructor() {
+    super();
+    this.ch = null; this.len = 0; this.pos = 0; this.playing = false; this.report = 0;
+    this.port.onmessage = e => {
+      const m = e.data;
+      if (m.type === 'load') { this.ch = m.channels; this.len = m.length; this.pos = 0; }
+      else if (m.type === 'play') this.playing = true;
+      else if (m.type === 'pause') this.playing = false;
+      else if (m.type === 'seek') this.pos = Math.max(0, Math.min(this.len - 1, m.frame));
+    };
+  }
+  process(inputs, outputs, params) {
+    const out = outputs[0];
+    const n = out[0].length;
+    if (!this.ch || !this.playing) {
+      for (const c of out) c.fill(0);
+      return true;
+    }
+    const rate = params.rate;
+    const constant = rate.length === 1;
+    for (let i = 0; i < n; i++) {
+      const r = constant ? rate[0] : rate[i];
+      const p = this.pos;
+      const i0 = p | 0, f = p - i0;
+      for (let c = 0; c < out.length; c++) {
+        const src = this.ch[c < this.ch.length ? c : 0];
+        const a = src[i0] || 0, b = src[i0 + 1] || 0;
+        out[c][i] = a + (b - a) * f;
+      }
+      this.pos += r;
+      // Only *forward* motion ends the track. Otherwise a scratch that starts
+      // at the last frame re-ends on the first quantum, before the rate param
+      // has finished ramping negative, and reverse never gets going.
+      if (this.pos >= this.len - 1) {
+        this.pos = this.len - 1;
+        if (r > 0) { this.playing = false; this.port.postMessage({ type: 'ended' }); break; }
+      }
+      if (this.pos <= 0) {
+        this.pos = 0;
+        if (r < 0) { this.port.postMessage({ type: 'pos', frame: 0 }); }
+      }
+    }
+    if ((this.report = (this.report + n) % 2048) < n) {
+      this.port.postMessage({ type: 'pos', frame: this.pos });
+    }
+    return true;
+  }
+}
+registerProcessor('turntable', Turntable);
+`;
+
+let workletReady = null;
+let ttNode = null, ttBuffer = null, ttFrames = 0, ttPos = 0, ttPlaying = false;
+let wearChain = null, crackleSrc = null, crackleGain = null, wowOsc = null, wowGain = null,
+    flutterOsc = null, flutterGain = null, toneLP = null, toneHP = null, shaper = null, wearOut = null;
+
+function loadWorklet() {
+  if (workletReady) return workletReady;
+  ensureAudio();
+  if (!ctxA.audioWorklet) return (workletReady = Promise.reject(new Error('no AudioWorklet')));
+  const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+  workletReady = ctxA.audioWorklet.addModule(url).finally(() => URL.revokeObjectURL(url));
+  return workletReady;
+}
+
+/** Soft-clip curve; drive rises as condition falls. */
+function saturationCurve(drive) {
+  const n = 1024, c = new Float32Array(n);
+  const k = 1 + drive * 12;
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    c[i] = Math.tanh(x * k) / Math.tanh(k);
+  }
+  return c;
+}
+
+/** Short loop of surface noise: steady hiss plus sparse pops. */
+function crackleBuffer(seconds = 4) {
+  const sr = ctxA.sampleRate;
+  const buf = ctxA.createBuffer(1, sr * seconds, sr);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * 0.06;
+  // Sparse crackle transients riding on top of the hiss floor.
+  const pops = (seconds * 90) | 0;
+  for (let k = 0; k < pops; k++) {
+    const at = (Math.random() * (d.length - 200)) | 0;
+    const amp = Math.random() * 0.85 + 0.15;
+    const dur = 12 + (Math.random() * 90 | 0);
+    for (let j = 0; j < dur; j++) {
+      d[at + j] += amp * (Math.random() * 2 - 1) * Math.pow(1 - j / dur, 3);
+    }
+  }
+  return buf;
+}
+
+function buildWearChain() {
+  if (wearChain) return wearChain;
+  ensureAudio();
+  wearChain = ctxA.createGain();          // input
+  wearOut = ctxA.createGain();            // output
+
+  toneHP = ctxA.createBiquadFilter(); toneHP.type = 'highpass'; toneHP.frequency.value = 20;
+  toneLP = ctxA.createBiquadFilter(); toneLP.type = 'lowpass';  toneLP.frequency.value = 20000;
+  shaper = ctxA.createWaveShaper(); shaper.curve = saturationCurve(0); shaper.oversample = '2x';
+
+  wearChain.connect(toneHP);
+  toneHP.connect(toneLP);
+  toneLP.connect(shaper);
+  shaper.connect(wearOut);
+
+  // Surface noise is mixed in beside the music, not filtered with it.
+  crackleSrc = ctxA.createBufferSource();
+  crackleSrc.buffer = crackleBuffer();
+  crackleSrc.loop = true;
+  crackleGain = ctxA.createGain();
+  crackleGain.gain.value = 0;
+  crackleSrc.connect(crackleGain);
+  crackleGain.connect(wearOut);
+  crackleSrc.start();
+
+  // Wow (slow drift) and flutter (fast waver) modulate the playhead rate.
+  wowOsc = ctxA.createOscillator(); wowOsc.frequency.value = 0.7;
+  wowGain = ctxA.createGain(); wowGain.gain.value = 0;
+  wowOsc.connect(wowGain); wowOsc.start();
+  flutterOsc = ctxA.createOscillator(); flutterOsc.frequency.value = 7.3;
+  flutterGain = ctxA.createGain(); flutterGain.gain.value = 0;
+  flutterOsc.connect(flutterGain); flutterOsc.start();
+
+  return wearChain;
+}
+
+/** Map the condition slider (1 = mint, 0 = trashed) onto the whole FX chain. */
+function applyWear() {
+  if (!wearChain) return;
+  const vinyl = cfg.skin === 'vinyl', tape = cfg.skin === 'tape';
+  const cond = clamp(vinyl ? cfg.vinylCondition : tape ? cfg.tapeQuality : 1, 0, 1);
+  const wear = 1 - cond;
+  const on = vinyl || tape;
+  const t = ctxA.currentTime, ramp = (p, v) => p.setTargetAtTime(v, t, 0.05);
+
+  if (!on) {
+    ramp(crackleGain.gain, 0);
+    ramp(toneLP.frequency, 20000);
+    ramp(toneHP.frequency, 20);
+    ramp(wowGain.gain, 0);
+    ramp(flutterGain.gain, 0);
+    shaper.curve = saturationCurve(0);
+    return;
+  }
+
+  // Tape hisses more evenly; vinyl pops and loses low end as it wears.
+  ramp(crackleGain.gain, wear * (vinyl ? 0.5 : 0.28));
+  ramp(toneLP.frequency, lerp(vinyl ? 19000 : 16000, vinyl ? 3600 : 3000, wear * wear));
+  ramp(toneHP.frequency, lerp(20, vinyl ? 170 : 110, wear));
+  shaper.curve = saturationCurve(wear * (tape ? 0.85 : 0.5));
+
+  // Rate modulation depth, in playback-rate units.
+  ramp(wowGain.gain, wear * (vinyl ? 0.010 : 0.016));
+  ramp(flutterGain.gain, wear * (vinyl ? 0.003 : 0.007));
+  wowOsc.frequency.setTargetAtTime(vinyl ? 0.66 : 1.1, t, 0.1);
+  flutterOsc.frequency.setTargetAtTime(vinyl ? 6.2 : 9.4, t, 0.1);
+}
+
+async function startTurntable(seekSeconds = 0, autoplay = true) {
+  if (!state.file) return false;
+  try {
+    await loadWorklet();
+  } catch {
+    toast('This browser has no AudioWorklet — scratching is unavailable.');
+    return false;
+  }
+  if (!ttBuffer || ttBuffer._srcFile !== state.file) {
+    const bytes = await state.file.arrayBuffer();
+    ttBuffer = await ctxA.decodeAudioData(bytes);
+    ttBuffer._srcFile = state.file;
+  }
+  ttFrames = ttBuffer.length;
+
+  stopTurntable();
+  ttNode = new AudioWorkletNode(ctxA, 'turntable', { outputChannelCount: [2] });
+  ttNode.port.onmessage = e => {
+    const m = e.data;
+    if (m.type === 'pos') ttPos = m.frame;
+    else if (m.type === 'ended') { ttPlaying = false; syncTransportUI(); }
+  };
+  const channels = [];
+  for (let c = 0; c < Math.min(2, ttBuffer.numberOfChannels); c++) {
+    channels.push(ttBuffer.getChannelData(c).slice());
+  }
+  ttNode.port.postMessage({ type: 'load', channels, length: ttFrames },
+                          channels.map(c => c.buffer));
+
+  buildWearChain();
+  wowGain.connect(ttNode.parameters.get('rate'));
+  flutterGain.connect(ttNode.parameters.get('rate'));
+  ttNode.connect(wearChain);
+  wearOut.connect(analyser);
+  wearOut.connect(stereoBus);
+  monitor.gain.value = 1;
+
+  ttPos = clamp(seekSeconds * ttBuffer.sampleRate, 0, ttFrames - 1);
+  ttNode.port.postMessage({ type: 'seek', frame: ttPos });
+  applyWear();
+  setTurntableRate(1);
+  if (autoplay) { ttPlaying = true; ttNode.port.postMessage({ type: 'play' }); }
+  ctxA.resume();
+  return true;
+}
+
+function stopTurntable() {
+  if (!ttNode) return;
+  try { ttNode.port.postMessage({ type: 'pause' }); } catch {}
+  try { wowGain.disconnect(ttNode.parameters.get('rate')); } catch {}
+  try { flutterGain.disconnect(ttNode.parameters.get('rate')); } catch {}
+  try { ttNode.disconnect(); } catch {}
+  try { wearOut.disconnect(); } catch {}
+  ttNode = null;
+  ttPlaying = false;
+}
+
+function setTurntableRate(r) {
+  if (!ttNode) return;
+  const p = ttNode.parameters.get('rate');
+  p.setTargetAtTime(r, ctxA.currentTime, 0.012);
+}
+
+/* One transport API over both engines, so the player UI does not care which
+   one is running. */
+const usingTurntable = () => !!ttNode;
+
+const transport = {
+  get playing() { return usingTurntable() ? ttPlaying : !audioEl.paused; },
+  get duration() { return usingTurntable() ? (ttBuffer ? ttBuffer.duration : 0) : (audioEl.duration || 0); },
+  get time() { return usingTurntable() ? (ttBuffer ? ttPos / ttBuffer.sampleRate : 0) : audioEl.currentTime; },
+  play() {
+    ctxA && ctxA.resume();
+    if (usingTurntable()) { ttPlaying = true; ttNode.port.postMessage({ type: 'play' }); syncTransportUI(); }
+    else audioEl.play().catch(() => {});
+  },
+  pause() {
+    if (usingTurntable()) { ttPlaying = false; ttNode.port.postMessage({ type: 'pause' }); syncTransportUI(); }
+    else audioEl.pause();
+  },
+  seek(sec) {
+    if (usingTurntable()) {
+      ttPos = clamp(sec * ttBuffer.sampleRate, 0, ttFrames - 1);
+      ttNode.port.postMessage({ type: 'seek', frame: ttPos });
+    } else if (audioEl.duration) audioEl.currentTime = clamp(sec, 0, audioEl.duration);
+  },
+};
+
+function syncTransportUI() {
+  $('#btnPlay').textContent = transport.playing ? '❚❚' : '▶';
+}
+
+/** Swap engines when the skin changes, keeping the playhead where it was. */
+async function syncEngine() {
+  const wants = (cfg.skin === 'vinyl' || cfg.skin === 'tape') && state.sourceKind === 'file' && !!state.file;
+  if (wants && !usingTurntable()) {
+    const at = audioEl.currentTime || 0, wasPlaying = !audioEl.paused;
+    audioEl.pause();
+    try { elSource && elSource.disconnect(); } catch {}
+    const ok = await startTurntable(at, wasPlaying);
+    if (!ok) { useFileSource(); if (wasPlaying) audioEl.play().catch(() => {}); }
+    syncTransportUI();
+  } else if (!wants && usingTurntable()) {
+    const at = transport.time, wasPlaying = ttPlaying;
+    stopTurntable();
+    useFileSource();
+    audioEl.currentTime = at;
+    if (wasPlaying) audioEl.play().catch(() => {});
+    syncTransportUI();
+  } else {
+    applyWear();
+  }
 }
 
 /* ------------------------------------------------------- metadata parsing -- */
@@ -941,7 +1266,10 @@ function setTrackInfo(title, sub) {
 }
 
 async function loadAudioFile(file) {
+  stopTurntable();
   useFileSource();
+  state.file = file;
+  ttBuffer = null;
   const url = URL.createObjectURL(file);
   audioEl.src = url;
   audioEl.load();
@@ -961,6 +1289,7 @@ async function loadAudioFile(file) {
 
   try { await audioEl.play(); } catch {}
   ctxA && ctxA.resume();
+  await syncEngine();
 }
 
 /* --------------------------------------------------------------- controls -- */
@@ -1041,6 +1370,14 @@ function buildControls() {
         row = document.createElement('div');
         row.className = 'pgrid';
         row.appendChild(b);
+
+      } else if (it.t === 'note') {
+        row = document.createElement('div');
+        row.className = 'hint';
+        row.textContent = it.label;
+
+      } else if (it.t === 'record') {
+        row = buildRecorder();
 
       } else if (it.t === 'presets') {
         row = buildPresets();
@@ -1141,6 +1478,8 @@ function refreshControls() {
 
 function onChange(key) {
   if (key === '*' || ['fftSize', 'smoothing', 'minDb', 'maxDb'].includes(key)) applyAnalyser();
+  if (key === '*' || key === 'skin') syncEngine();
+  else if (key === 'vinylCondition' || key === 'tapeQuality') applyWear();
   if (key === '*') refreshControls();
   else {
     for (const el of pbody.querySelectorAll('[data-cond]')) el.style.display = el._show(cfg) ? '' : 'none';
@@ -1745,6 +2084,421 @@ function drawCenterArt(radius) {
   ctx.stroke();
 }
 
+/* ============================ player skins ================================ */
+
+const secPerRev = () => 60 / (cfg.vinylRPM || 33);
+
+/** Geometry shared by the skins and by pointer hit-testing. */
+function skinGeom() {
+  const s = Math.min(W, H) * 0.34 * cfg.skinSize;
+  return { cx: W / 2, cy: H / 2, R: s };
+}
+
+function drawSkin() {
+  if (cfg.skin === 'none') return;
+  // Knock the spectrum back so the player reads as the foreground object.
+  if (cfg.skinDim > 0) {
+    ctx.fillStyle = `rgba(4,4,9,${cfg.skinDim})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.save();
+  ctx.globalAlpha = cfg.skinOpacity;
+  if (cfg.skin === 'vinyl') drawVinyl();
+  else if (cfg.skin === 'cd') drawCD();
+  else if (cfg.skin === 'tape') drawTape();
+  ctx.restore();
+}
+
+/** Deterministic speck field, rebuilt only when the disc is resized. */
+function dustField(R) {
+  if (state.dust && state.dust.R === R) return state.dust;
+  const pts = [];
+  for (let i = 0; i < 420; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * R;
+    pts.push([Math.cos(a) * r, Math.sin(a) * r, Math.random(), Math.random() * 1.6 + 0.3]);
+  }
+  const scuffs = [];
+  for (let i = 0; i < 26; i++) {
+    scuffs.push([Math.random() * Math.PI * 2, 0.3 + Math.random() * 0.65, Math.random() * 0.5 + 0.08, Math.random()]);
+  }
+  return (state.dust = { R, pts, scuffs });
+}
+
+function drawVinyl() {
+  const { cx, cy, R } = skinGeom();
+  const wear = 1 - clamp(cfg.vinylCondition, 0, 1);
+  const labelR = R * 0.34;
+
+  // Warp: a worn record sits unevenly and wobbles once per revolution.
+  const warp = wear * 0.05;
+  const wob = Math.sin(state.discAngle) * warp;
+  const wob2 = Math.cos(state.discAngle * 1.0) * warp * 0.6;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Plinth + platter.
+  ctx.fillStyle = 'rgba(10,10,14,0.85)';
+  roundRect(-R * 1.32, -R * 1.24, R * 2.64, R * 2.48, R * 0.10);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 1.06, 0, 7);
+  ctx.fillStyle = 'rgba(24,24,30,0.95)';
+  ctx.fill();
+
+  // The record itself, squashed slightly to fake the warp tilt.
+  ctx.save();
+  ctx.scale(1 + wob, 1 - wob2);
+  ctx.rotate(state.discAngle);
+
+  const disc = ctx.createRadialGradient(0, 0, labelR, 0, 0, R);
+  disc.addColorStop(0, '#141416');
+  disc.addColorStop(0.5, '#0b0b0d');
+  disc.addColorStop(1, '#161619');
+  ctx.beginPath();
+  ctx.arc(0, 0, R, 0, 7);
+  ctx.fillStyle = disc;
+  ctx.fill();
+
+  // Grooves.
+  ctx.lineWidth = 1;
+  for (let r = labelR + 4; r < R - 2; r += Math.max(2.5, R * 0.012)) {
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, 7);
+    ctx.strokeStyle = `rgba(255,255,255,${0.020 + 0.016 * Math.sin(r * 0.7)})`;
+    ctx.stroke();
+  }
+
+  // A specular sweep so the rotation is legible even on a static frame.
+  const sheen = ctx.createLinearGradient(-R, -R, R, R);
+  sheen.addColorStop(0, 'rgba(255,255,255,0)');
+  sheen.addColorStop(0.42, 'rgba(255,255,255,0.055)');
+  sheen.addColorStop(0.5, 'rgba(255,255,255,0.11)');
+  sheen.addColorStop(0.58, 'rgba(255,255,255,0.055)');
+  sheen.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.beginPath();
+  ctx.arc(0, 0, R, 0, 7);
+  ctx.fillStyle = sheen;
+  ctx.fill();
+
+  // Wear: dust specks and scuff arcs scale with how bad the condition is.
+  if (wear > 0.02) {
+    const d = dustField(Math.round(R));
+    ctx.fillStyle = `rgba(255,255,255,${0.10 + wear * 0.32})`;
+    const shown = (d.pts.length * wear) | 0;
+    for (let i = 0; i < shown; i++) {
+      const p = d.pts[i];
+      if (Math.hypot(p[0], p[1]) < labelR) continue;
+      ctx.fillRect(p[0], p[1], p[3], p[3]);
+    }
+    ctx.lineWidth = 1;
+    for (let i = 0; i < d.scuffs.length * wear; i++) {
+      const s = d.scuffs[i];
+      ctx.strokeStyle = `rgba(255,255,255,${0.05 + wear * 0.10})`;
+      ctx.beginPath();
+      ctx.arc(0, 0, labelR + s[1] * (R - labelR), s[0], s[0] + s[2]);
+      ctx.stroke();
+    }
+  }
+
+  // Centre label: album art if we have it, otherwise the extracted palette.
+  ctx.beginPath();
+  ctx.arc(0, 0, labelR, 0, 7);
+  ctx.closePath();
+  ctx.save();
+  ctx.clip();
+  if (cfg.vinylLabelArt && state.cover) {
+    const img = state.cover;
+    const sc = Math.max((labelR * 2) / img.width, (labelR * 2) / img.height);
+    ctx.drawImage(img, -img.width * sc / 2, -img.height * sc / 2, img.width * sc, img.height * sc);
+  } else {
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, labelR);
+    g.addColorStop(0, colorAt(0.15, 1));
+    g.addColorStop(1, colorAt(0.75, 1));
+    ctx.fillStyle = g;
+    ctx.fillRect(-labelR, -labelR, labelR * 2, labelR * 2);
+  }
+  ctx.restore();
+
+  // Palette ring around the label, and the spindle.
+  ctx.beginPath();
+  ctx.arc(0, 0, labelR, 0, 7);
+  ctx.strokeStyle = colorAt(0.5, 0.9);
+  ctx.lineWidth = Math.max(2, R * 0.016);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(0, 0, Math.max(2.5, R * 0.022), 0, 7);
+  ctx.fillStyle = '#0a0a0c';
+  ctx.fill();
+  ctx.restore();  // rotation + warp scale
+
+  // Tonearm tracks inward as the track plays.
+  if (cfg.tonearm) {
+    const prog = transport.duration ? clamp(transport.time / transport.duration, 0, 1) : 0;
+    const pivot = { x: R * 1.18, y: -R * 0.72 };
+    const armLen = R * 1.30;
+    const pd = Math.hypot(pivot.x, pivot.y);
+    const pa = Math.atan2(pivot.y, pivot.x);
+    // Stylus rides from the outer groove inward. Solve for the arm angle that
+    // puts a fixed-length arm's tip on that groove radius, so it sweeps the way
+    // a real arm does instead of pointing at an arbitrary spot.
+    const rt = lerp(R * 0.94, R * 0.44, prog) * (1 + wob * 0.5);
+    const cosPhi = clamp((pd * pd + rt * rt - armLen * armLen) / (2 * pd * rt), -1, 1);
+    const tAng = pa + Math.acos(cosPhi);
+    const tip = { x: Math.cos(tAng) * rt, y: Math.sin(tAng) * rt };
+    const ang = Math.atan2(tip.y - pivot.y, tip.x - pivot.x);
+
+    ctx.strokeStyle = 'rgba(214,218,230,0.85)';
+    ctx.lineWidth = Math.max(2, R * 0.022);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(pivot.x, pivot.y);
+    ctx.lineTo(tip.x, tip.y);
+    ctx.stroke();
+    // Headshell.
+    ctx.save();
+    ctx.translate(tip.x, tip.y);
+    ctx.rotate(ang);
+    ctx.fillStyle = 'rgba(230,232,240,0.92)';
+    roundRect(-R * 0.05, -R * 0.028, R * 0.10, R * 0.056, R * 0.012);
+    ctx.fill();
+    ctx.restore();
+    // Pivot post.
+    ctx.beginPath();
+    ctx.arc(pivot.x, pivot.y, R * 0.055, 0, 7);
+    ctx.fillStyle = 'rgba(40,42,50,0.95)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  ctx.restore();  // translate
+
+  // Fuzz: a sparse noise veil over the whole stage as condition drops.
+  if (wear > 0.05) drawFuzz(wear * 0.5);
+}
+
+/** Cheap film-grain overlay — random dots, no per-pixel image data. */
+function drawFuzz(amount) {
+  const n = (amount * 900) | 0;
+  ctx.save();
+  ctx.globalAlpha = clamp(amount * 0.5, 0, 0.4);
+  ctx.fillStyle = '#ffffff';
+  for (let i = 0; i < n; i++) {
+    ctx.fillRect(Math.random() * W, Math.random() * H, 1.3, 1.3);
+  }
+  ctx.restore();
+}
+
+function drawCD() {
+  const { cx, cy, R } = skinGeom();
+  const holeR = R * 0.13, innerR = R * 0.22;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(state.cdAngle);
+
+  ctx.beginPath();
+  ctx.arc(0, 0, R, 0, 7);
+  ctx.fillStyle = '#0e0e12';
+  ctx.fill();
+
+  // Album art fills the data area.
+  if (cfg.cdArt && state.cover) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, 7);
+    ctx.arc(0, 0, innerR, 0, 7, true);
+    ctx.clip('evenodd');
+    const img = state.cover;
+    const sc = Math.max((R * 2) / img.width, (R * 2) / img.height);
+    ctx.drawImage(img, -img.width * sc / 2, -img.height * sc / 2, img.width * sc, img.height * sc);
+    ctx.restore();
+  } else {
+    const g = ctx.createRadialGradient(0, 0, innerR, 0, 0, R);
+    g.addColorStop(0, colorAt(0.2, 0.9));
+    g.addColorStop(1, colorAt(0.85, 0.9));
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, 7);
+    ctx.fillStyle = g;
+    ctx.fill();
+  }
+
+  // Diffraction rainbow: wedges of shifting hue, cheap stand-in for a conic gradient.
+  if (cfg.cdSheen > 0) {
+    const wedges = 72;
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < wedges; i++) {
+      const a = (i / wedges) * Math.PI * 2;
+      const hue = (i / wedges * 1.6 + state.t * 0.05) % 1;
+      const [r, g2, b] = hsl2rgb(hue, 0.95, 0.55);
+      // Tight opposing lobes: a real disc flares where the light catches it,
+      // it does not glow evenly all the way round.
+      const lobe = Math.pow(Math.abs(Math.sin(a + state.t * 0.5)), 8);
+      const strength = cfg.cdSheen * (0.012 + 0.40 * lobe);
+      ctx.fillStyle = `rgba(${r|0},${g2|0},${b|0},${strength})`;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, a, a + (Math.PI * 2) / wedges + 0.01);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // Fine data-track rings.
+  ctx.lineWidth = 1;
+  for (let r = innerR + 3; r < R; r += Math.max(3, R * 0.026)) {
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, 7);
+    ctx.strokeStyle = 'rgba(255,255,255,0.030)';
+    ctx.stroke();
+  }
+
+  // Clear plastic hub and the hole.
+  ctx.beginPath();
+  ctx.arc(0, 0, innerR, 0, 7);
+  ctx.fillStyle = 'rgba(190,200,215,0.20)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(0, 0, holeR, 0, 7);
+  ctx.fillStyle = '#05050a';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(0, 0, R, 0, 7);
+  ctx.strokeStyle = 'rgba(255,255,255,0.30)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawTape() {
+  const { cx, cy, R } = skinGeom();
+  const w = R * 2.05, h = R * 1.30;
+  const prog = transport.duration ? clamp(transport.time / transport.duration, 0, 1) : 0;
+  const wear = 1 - clamp(cfg.tapeQuality, 0, 1);
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Shell.
+  const shell = ctx.createLinearGradient(0, -h / 2, 0, h / 2);
+  shell.addColorStop(0, 'rgba(46,48,58,0.96)');
+  shell.addColorStop(1, 'rgba(24,25,32,0.96)');
+  roundRect(-w / 2, -h / 2, w, h, R * 0.07);
+  ctx.fillStyle = shell;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Corner screws.
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  for (const [sx, sy] of [[-1,-1],[1,-1],[-1,1],[1,1]]) {
+    ctx.beginPath();
+    ctx.arc(sx * (w / 2 - R * 0.075), sy * (h / 2 - R * 0.075), R * 0.021, 0, 7);
+    ctx.fill();
+  }
+
+  // Paper label, tinted from the cover.
+  const lw = w * 0.86, lh = h * 0.34;
+  roundRect(-lw / 2, -h / 2 + h * 0.075, lw, lh, R * 0.02);
+  const lab = ctx.createLinearGradient(-lw / 2, 0, lw / 2, 0);
+  lab.addColorStop(0, colorAt(0.15, 0.85));
+  lab.addColorStop(1, colorAt(0.7, 0.85));
+  ctx.fillStyle = lab;
+  ctx.fill();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(-lw / 2, -h / 2 + h * 0.075, lw, lh);
+  ctx.clip();
+  ctx.fillStyle = 'rgba(8,8,12,0.86)';
+  ctx.font = `600 ${Math.max(9, R * 0.085)}px ui-sans-serif,system-ui,sans-serif`;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(state.title || 'Untitled', -lw / 2 + R * 0.06, -h / 2 + h * 0.075 + lh * 0.34);
+  ctx.font = `400 ${Math.max(8, R * 0.062)}px ui-sans-serif,system-ui,sans-serif`;
+  ctx.fillStyle = 'rgba(8,8,12,0.6)';
+  ctx.fillText(state.artist || '', -lw / 2 + R * 0.06, -h / 2 + h * 0.075 + lh * 0.70);
+  ctx.restore();
+
+  // Reel window.
+  const winY = h * 0.11, winH = h * 0.42, winW = w * 0.74;
+  roundRect(-winW / 2, winY - winH / 2, winW, winH, R * 0.03);
+  ctx.fillStyle = 'rgba(8,9,13,0.85)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Two reels; the tape pack moves from the left hub to the right one.
+  const hubR = R * 0.085, maxPack = R * 0.235;
+  const packL = lerp(maxPack, hubR * 1.06, prog);
+  const packR = lerp(hubR * 1.06, maxPack, prog);
+  const reelX = winW * 0.26;
+  for (const [x, pack] of [[-reelX, packL], [reelX, packR]]) {
+    ctx.beginPath();
+    ctx.arc(x, winY, pack, 0, 7);
+    ctx.fillStyle = 'rgba(58,42,32,0.95)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.save();
+    ctx.translate(x, winY);
+    ctx.rotate(state.reelAngle);
+    ctx.beginPath();
+    ctx.arc(0, 0, hubR, 0, 7);
+    ctx.fillStyle = 'rgba(228,230,238,0.92)';
+    ctx.fill();
+    // Hub teeth make the rotation readable.
+    ctx.fillStyle = 'rgba(30,30,38,0.9)';
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * hubR * 0.32, Math.sin(a) * hubR * 0.32);
+      ctx.lineTo(Math.cos(a + 0.34) * hubR * 0.86, Math.sin(a + 0.34) * hubR * 0.86);
+      ctx.lineTo(Math.cos(a - 0.34) * hubR * 0.86, Math.sin(a - 0.34) * hubR * 0.86);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // Exposed tape across the bottom edge.
+  ctx.strokeStyle = 'rgba(52,38,28,0.95)';
+  ctx.lineWidth = Math.max(2, R * 0.03);
+  ctx.beginPath();
+  ctx.moveTo(-winW * 0.34, h / 2 - h * 0.10);
+  ctx.lineTo(winW * 0.34, h / 2 - h * 0.10);
+  ctx.stroke();
+
+  // Recording indicator.
+  if (state.recording) {
+    ctx.beginPath();
+    ctx.arc(w / 2 - R * 0.16, -h / 2 + R * 0.14, R * 0.035, 0, 7);
+    ctx.fillStyle = `rgba(255,60,60,${0.55 + 0.45 * Math.sin(state.t * 7)})`;
+    ctx.fill();
+  }
+
+  ctx.restore();
+  if (wear > 0.05) drawFuzz(wear * 0.32);
+}
+
 function drawInfo() {
   if (!cfg.showInfo || !state.title) return;
   ctx.save();
@@ -1777,18 +2531,37 @@ function frame(now) {
   if (W !== canvas.clientWidth || H !== canvas.clientHeight) resize();
 
   analyse(dt);
+  updateSkinMotion(dt);
   drawBackground();
   ctx.globalCompositeOperation = COMPOSITE[cfg.mode] || 'source-over';
   (RENDER[cfg.mode] || drawBars)();
   ctx.globalCompositeOperation = 'source-over';
+  drawSkin();
   drawVignette();
   drawInfo();
 
-  if (state.sourceKind === 'file' && !audioEl.paused && audioEl.duration) {
+  const dur = transport.duration;
+  if (state.sourceKind === 'file' && dur) {
     const s = $('#seek');
-    if (!s.matches(':active')) s.value = (audioEl.currentTime / audioEl.duration) * 1000;
-    $('#tCur').textContent = fmt(audioEl.currentTime);
+    if (!s.matches(':active')) s.value = (transport.time / dur) * 1000;
+    $('#tCur').textContent = fmt(transport.time);
   }
+}
+
+/** Platter/reel motion, and the scratch physics that drives playback rate. */
+function updateSkinMotion(dt) {
+  const target = state.grab ? state.grab.rate : (transport.playing ? 1 : 0);
+  // Snappy while a hand is on the record; a slow settle afterwards is what
+  // turns a flick into coasting momentum.
+  const tau = state.grab ? 0.03 : 0.22;
+  state.rate = lerp(state.rate, target, 1 - Math.exp(-dt / Math.max(0.001, tau)));
+  if (Math.abs(state.rate - target) < 0.002) state.rate = target;
+  if (usingTurntable()) setTurntableRate(state.rate);
+
+  const spin = usingTurntable() ? state.rate : (transport.playing ? 1 : 0);
+  state.discAngle += (Math.PI * 2 / secPerRev()) * spin * dt;
+  state.cdAngle   += Math.PI * 2 * 0.5 * cfg.cdSpin * spin * dt;
+  state.reelAngle += Math.PI * 2 * 0.55 * cfg.tapeSpin * spin * dt;
 }
 
 const fmt = s => {
@@ -1855,17 +2628,173 @@ function randomize() {
 const playPause = () => {
   if (state.sourceKind !== 'file') return;
   ctxA && ctxA.resume();
-  audioEl.paused ? audioEl.play().catch(() => {}) : audioEl.pause();
+  transport.playing ? transport.pause() : transport.play();
 };
 $('#btnPlay').onclick = playPause;
-audioEl.onplay = () => { $('#btnPlay').textContent = '❚❚'; ctxA && ctxA.resume(); };
-audioEl.onpause = () => $('#btnPlay').textContent = '▶';
+audioEl.onplay = () => { if (!usingTurntable()) $('#btnPlay').textContent = '❚❚'; ctxA && ctxA.resume(); };
+audioEl.onpause = () => { if (!usingTurntable()) $('#btnPlay').textContent = '▶'; };
 audioEl.onloadedmetadata = () => { $('#tDur').textContent = fmt(audioEl.duration); $('#seek').disabled = false; };
-audioEl.onended = () => $('#btnPlay').textContent = '▶';
+audioEl.onended = () => { if (!usingTurntable()) $('#btnPlay').textContent = '▶'; };
 audioEl.onerror = () => toast('That file could not be decoded by this browser.');
 
-$('#seek').oninput = e => { if (audioEl.duration) audioEl.currentTime = (e.target.value / 1000) * audioEl.duration; };
+$('#seek').oninput = e => { const d = transport.duration; if (d) transport.seek((e.target.value / 1000) * d); };
 $('#vol').oninput = e => { audioEl.volume = +e.target.value; $('#volIcon').textContent = +e.target.value === 0 ? '🔇' : +e.target.value < .5 ? '🔉' : '🔊'; };
+
+/* ---- scratching -------------------------------------------------------- */
+/* Dragging the record sets the playback rate from the pointer's angular
+   velocity. Because the worklet takes a signed rate, dragging backwards plays
+   backwards, which is what makes it feel like a real platter. */
+
+const overRecord = (x, y) => {
+  if (cfg.skin !== 'vinyl') return false;
+  const { cx, cy, R } = skinGeom();
+  return Math.hypot(x - cx, y - cy) <= R;
+};
+
+canvas.addEventListener('pointerdown', e => {
+  if (!overRecord(e.offsetX, e.offsetY)) return;
+  if (!usingTurntable()) {
+    toast(state.sourceKind === 'file'
+      ? 'Loading the record for scratching…'
+      : 'Scratching needs a loaded audio file.');
+    return;
+  }
+  const { cx, cy } = skinGeom();
+  canvas.setPointerCapture(e.pointerId);
+  state.grab = { a: Math.atan2(e.offsetY - cy, e.offsetX - cx), t: performance.now(), rate: 0 };
+  state.grabWasPlaying = ttPlaying;
+  // A stopped record can still be scratched, so drive the worklet regardless.
+  ttNode.port.postMessage({ type: 'play' });
+  canvas.style.cursor = 'grabbing';
+});
+
+canvas.addEventListener('pointermove', e => {
+  if (!state.grab) {
+    canvas.style.cursor = overRecord(e.offsetX, e.offsetY) ? 'grab' : '';
+    return;
+  }
+  const { cx, cy } = skinGeom();
+  const a = Math.atan2(e.offsetY - cy, e.offsetX - cx);
+  const now = performance.now();
+  let da = a - state.grab.a;
+  while (da > Math.PI) da -= Math.PI * 2;          // shortest way round
+  while (da < -Math.PI) da += Math.PI * 2;
+  const dt = Math.max(0.008, (now - state.grab.t) / 1000);
+  const omega = da / dt;                            // rad/s under the finger
+  state.grab.rate = clamp(omega * secPerRev() / (Math.PI * 2), -8, 8);
+  state.grab.a = a;
+  state.grab.t = now;
+});
+
+const endGrab = e => {
+  if (!state.grab) return;
+  // A stale pointer means the finger stopped moving before lifting: no flick.
+  if (performance.now() - state.grab.t > 90) state.grab.rate = 0;
+  state.grab = null;
+  canvas.style.cursor = '';
+  try { canvas.releasePointerCapture(e.pointerId); } catch {}
+  if (usingTurntable() && !state.grabWasPlaying) {
+    ttPlaying = false;
+    ttNode.port.postMessage({ type: 'pause' });
+  }
+  syncTransportUI();
+};
+canvas.addEventListener('pointerup', endGrab);
+canvas.addEventListener('pointercancel', endGrab);
+
+/* ---- tape voice-over ---------------------------------------------------- */
+
+let mediaRec = null, recChunks = null, recStream = null;
+
+function buildRecorder() {
+  const wrap = document.createElement('div');
+  const bar = document.createElement('div');
+  bar.className = 'pgrid';
+
+  const rec = document.createElement('button');
+  rec.className = 'btn sm';
+  rec.id = 'btnRec';
+  rec.textContent = '● Record note';
+  rec.onclick = () => (state.recording ? stopRecording() : startRecording());
+
+  const play = document.createElement('button');
+  play.className = 'btn sm';
+  play.id = 'btnPlayNote';
+  play.textContent = '▶ Note';
+  play.disabled = true;
+  play.onclick = playAnnotation;
+
+  const del = document.createElement('button');
+  del.className = 'btn sm';
+  del.id = 'btnDelNote';
+  del.textContent = 'Clear';
+  del.disabled = true;
+  del.onclick = () => {
+    if (state.annotationURL) URL.revokeObjectURL(state.annotationURL);
+    state.annotation = state.annotationURL = null;
+    syncRecUI();
+    toast('Note cleared.');
+  };
+
+  bar.append(rec, play, del);
+  wrap.appendChild(bar);
+
+  const hint = document.createElement('div');
+  hint.className = 'hint';
+  hint.textContent = 'Record a spoken note over the tape — what the song is about, who it is for. Kept for this session.';
+  wrap.appendChild(hint);
+  return wrap;
+}
+
+function syncRecUI() {
+  const rec = $('#btnRec'), play = $('#btnPlayNote'), del = $('#btnDelNote');
+  if (!rec) return;
+  rec.textContent = state.recording ? '■ Stop' : '● Record note';
+  rec.classList.toggle('on', state.recording);
+  const has = !!state.annotation;
+  play.disabled = !has;
+  del.disabled = !has;
+}
+
+async function startRecording() {
+  try {
+    recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    toast('Microphone denied — cannot record a note.');
+    return;
+  }
+  recChunks = [];
+  const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', ''];
+  const mime = types.find(t => !t || (window.MediaRecorder && MediaRecorder.isTypeSupported(t)));
+  mediaRec = new MediaRecorder(recStream, mime ? { mimeType: mime } : undefined);
+  mediaRec.ondataavailable = e => e.data.size && recChunks.push(e.data);
+  mediaRec.onstop = () => {
+    const blob = new Blob(recChunks, { type: mediaRec.mimeType || 'audio/webm' });
+    if (state.annotationURL) URL.revokeObjectURL(state.annotationURL);
+    state.annotation = blob;
+    state.annotationURL = URL.createObjectURL(blob);
+    recStream.getTracks().forEach(t => t.stop());
+    recStream = null;
+    state.recording = false;
+    syncRecUI();
+    toast(`Note saved (${(blob.size / 1024).toFixed(0)} KB). Press ▶ Note to hear it.`);
+  };
+  mediaRec.start();
+  state.recording = true;
+  syncRecUI();
+  toast('Recording… press ■ Stop when done.');
+}
+
+function stopRecording() {
+  if (mediaRec && mediaRec.state !== 'inactive') mediaRec.stop();
+}
+
+function playAnnotation() {
+  if (!state.annotationURL) return;
+  const a = new Audio(state.annotationURL);
+  a.volume = 1;
+  a.play().catch(() => toast('Could not play the note.'));
+}
 
 // Drag & drop: audio files load as tracks, images become the palette source.
 let dragDepth = 0;
@@ -1902,8 +2831,8 @@ addEventListener('keydown', e => {
     onChange('*');
     toast(MODES.find(m => m[0] === cfg.mode)[1]);
   }
-  else if (k === 'arrowright' && state.sourceKind === 'file') audioEl.currentTime += 5;
-  else if (k === 'arrowleft' && state.sourceKind === 'file') audioEl.currentTime -= 5;
+  else if (k === 'arrowright' && state.sourceKind === 'file') transport.seek(transport.time + 5);
+  else if (k === 'arrowleft' && state.sourceKind === 'file') transport.seek(transport.time - 5);
 });
 
 // Auto-hide the chrome when the pointer goes still.

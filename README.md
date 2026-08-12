@@ -65,11 +65,59 @@ around with it — set Rotation to 0 to keep the channels fixed in place.
 Analysis runs on a parallel branch of the audio graph that never reaches the
 output, so it costs nothing audible.
 
+## Player skins
+
+A skin is an independent layer drawn over whichever spectrum mode is running —
+pick a surface and a visual mode separately, so you can have the turntable with
+bars reacting behind it. `Size`, `Opacity` and `Dim viz` control how much of the
+stage it takes.
+
+### Vinyl turntable
+
+A record on a plinth with a tracking tonearm, grooves, and a centre label that
+takes the album art — or, without art, the colors extracted from it.
+
+**Drag the record to scratch it.** The rate follows your pointer's angular
+velocity, so dragging backwards plays backwards and flicking sends it spinning
+before it settles back to speed. This is why the vinyl and tape skins swap the
+playback engine: an `<audio>` element cannot play in reverse (`playbackRate` is
+positive-only), so the decoded samples are run through an `AudioWorklet` that
+walks a playhead at a signed, fractional rate. Switching skins hands the engine
+over in place and keeps the playhead where it was.
+
+**Condition** is audible, not just cosmetic. As it falls you get surface
+crackle and hiss, the bandwidth closes in (19 kHz → 3.6 kHz) with the low end
+thinning out, soft-clip saturation builds, and wow/flutter set in — the rate is
+an a-rate `AudioParam`, so two LFOs are simply connected to it. Visually the
+disc gains dust, scuffs, an off-centre warp wobble, and a grain veil.
+
+`33⅓ / 45 / 78 RPM` changes how fast the platter turns and therefore how much
+audio one revolution covers when you scratch.
+
+### Cassette
+
+A shell with a palette-tinted label carrying the track title, a window, and two
+reels whose tape packs shift from the left hub to the right as the track plays.
+**Tape quality** drives the same DSP chain tuned differently — more even hiss,
+heavier saturation, faster wow — plus visible grain.
+
+**Record note** captures a spoken annotation over the tape via `MediaRecorder`
+— what the song is about, who it's for. Kept for the session; it moves into the
+library in the next stage.
+
+### CD
+
+A spinning disc with the album art in the data area, fine track rings, a clear
+plastic hub, and a diffraction sheen of tight rainbow lobes that sweep as it
+turns. Spin speed, sheen strength and art on/off are all adjustable.
+
 ## Customization
 
 Everything in the panel is live and persists to `localStorage`:
 
 - **Mode** — stereo split, bass pulse, rotation, line weight, particle count and speed
+- **Player skin** — surface, size, opacity, viz dimming, plus the per-skin
+  controls (vinyl condition/RPM/tonearm, CD spin/sheen, tape quality/reels)
 - **Bars** — count, gap, roundness, mirror, peak caps, reflection
 - **Color** — palette source, spread, hue drift, saturation, brightness
 - **Glow & background** — glow, motion tail, blurred cover / palette gradient /
@@ -165,3 +213,8 @@ were verified by serving the page under those exact headers.
   read, so drop an image in for colors.
 - Everything stays on your machine. Files are read with `URL.createObjectURL`
   and never uploaded.
+- The vinyl and tape skins decode the whole track into memory to allow
+  scratching, so a long track costs a few hundred MB while it is loaded. The CD
+  skin and plain visualizer modes stream as before.
+- Scratching needs `AudioWorklet`. Where it is unavailable the skins still draw
+  and playback continues on the normal engine.

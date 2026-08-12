@@ -16,7 +16,9 @@ __DOMAIN__ {
 		# Prism is entirely self-contained — no CDNs, no fonts, no network calls —
 		# so everything can be locked to 'self'. The inline allowances are needed
 		# because the whole app is one <style> and one <script> in index.html.
-		Content-Security-Policy "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		# blob: on script-src/worker-src is required by the vinyl and tape skins:
+		# the AudioWorklet that does signed-rate playback is built from a Blob URL.
+		Content-Security-Policy "default-src 'none'; script-src 'unsafe-inline' blob:; worker-src blob:; child-src blob:; style-src 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 		# The mic and tab-capture sources need these explicitly granted; a
 		# restrictive default would silently break two of the three inputs.
