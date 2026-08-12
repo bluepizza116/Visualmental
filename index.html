@@ -725,14 +725,40 @@ function extractPalette(img, count = 6) {
   // Covers often win a bucket with a near-black or washed-out backdrop color.
   // Faithful, but unreadable as a bar against a dark stage — so lift only the
   // colors that would disappear, keeping their hue intact.
-  return out.map(o => {
+  const hasColor = out.some(o => rgb2hsl(o.r, o.g, o.b)[1] > 0.12);
+
+  const lifted = out.map((o, i) => {
     let [h, s, l] = rgb2hsl(o.r, o.g, o.b);
-    if (l < 0.34) l = 0.46;
-    else if (l > 0.93) l = 0.86;
-    if (s < 0.22) s = 0.34;
+    if (s < 0.08) {
+      // Grey has no hue — rgb2hsl reports 0, which *is* red. Saturating that
+      // would paint a black-and-white cover bright red, so leave it neutral.
+      // With nothing chromatic anywhere, spread the greys across lightness
+      // instead so the visualization still has separation to work with.
+      s = 0;
+      l = hasColor ? clamp(l, 0.34, 0.9)
+                   : 0.34 + (i / Math.max(1, out.length - 1)) * 0.52;
+    } else {
+      if (l < 0.34) l = 0.46;
+      else if (l > 0.93) l = 0.86;
+      if (s < 0.22) s = 0.34;
+    }
     const [r, g, b] = hsl2rgb(h, s, l);
     return { r, g, b };
   });
+
+  // Clamping can land two different inputs on the same output, which would
+  // leave a dead flat segment in the color ramp.
+  const uniq = [];
+  for (const c of lifted) {
+    if (uniq.every(o => Math.hypot(o.r - c.r, o.g - c.g, o.b - c.b) > 24)) uniq.push(c);
+  }
+  if (!uniq.length) return FALLBACK_PALETTE.slice();
+  while (uniq.length < 3) {
+    const [h, s, l] = rgb2hsl(uniq[0].r, uniq[0].g, uniq[0].b);
+    const [r, g, b] = hsl2rgb(h, s, clamp(l + 0.16 * uniq.length, 0.25, 0.88));
+    uniq.push({ r, g, b });
+  }
+  return uniq;
 }
 
 function paletteStops() {
@@ -1598,7 +1624,12 @@ const dismissSplash = () => $('#splash').classList.add('gone');
 $('#fileInput').onchange = e => { const f = e.target.files[0]; if (f) loadAudioFile(f); e.target.value = ''; };
 $('#imgInput').onchange = e => {
   const f = e.target.files[0];
-  if (f) { setCover(URL.createObjectURL(f)); cfg.palette = 'cover'; onChange('*'); }
+  if (f) {
+    setCover(URL.createObjectURL(f));
+    cfg.palette = 'cover';
+    onChange('*');
+    toast('Palette pulled from that image.');
+  }
   e.target.value = '';
 };
 
