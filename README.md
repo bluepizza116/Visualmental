@@ -42,11 +42,34 @@ rainbow, monochrome, or heat.
 
 Press `V` to cycle (`Shift+V` to go back).
 
+## Stereo
+
+**Stereo split** (panel, or `S`) shows the left and right channels separately in
+every mode, mirrored about the centre:
+
+| Mode | Left channel | Right channel |
+| --- | --- | --- |
+| Spectrum bars | spreads left from centre | spreads right from centre |
+| Radial burst | sweeps down the left side | sweeps down the right side |
+| Waveform | trace above centre | trace below centre |
+| Liquid blob | left half of the outline | right half |
+| Particle field | particles left of centre | particles right of centre |
+| Pulse rings | left half of each ring | right half |
+
+In bars and radial the low frequencies meet in the middle and climb outward, so
+bass sits at the centre and treble at the edges. Mono sources are up-mixed, so
+both sides stay identical rather than the right half going dark. Note that if
+Rotation is non-zero the whole figure spins, which carries the left/right split
+around with it — set Rotation to 0 to keep the channels fixed in place.
+
+Analysis runs on a parallel branch of the audio graph that never reaches the
+output, so it costs nothing audible.
+
 ## Customization
 
 Everything in the panel is live and persists to `localStorage`:
 
-- **Mode** — bass pulse, rotation, line weight, particle count
+- **Mode** — stereo split, bass pulse, rotation, line weight, particle count and speed
 - **Bars** — count, gap, roundness, mirror, peak caps, reflection
 - **Color** — palette source, spread, hue drift, saturation, brightness
 - **Glow & background** — glow, motion tail, blurred cover / palette gradient /
@@ -65,6 +88,7 @@ settings around. `🎲` randomizes the whole look.
 | `Space` | Play / pause |
 | `←` `→` | Seek ±5s |
 | `V` | Next visual mode (`Shift+V` previous) |
+| `S` | Toggle stereo split |
 | `C` | Toggle the control panel |
 | `H` | Hide all UI |
 | `F` | Fullscreen |

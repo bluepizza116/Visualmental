@@ -219,7 +219,7 @@ kbd{background:rgba(255,255,255,.1); border:1px solid var(--line); border-bottom
       <button class="btn" id="sMic">◉ Use microphone</button>
     </div>
     <p style="margin-top:26px;font-size:12.5px">
-      <kbd>Space</kbd> play · <kbd>V</kbd> mode · <kbd>C</kbd> controls · <kbd>H</kbd> hide UI · <kbd>F</kbd> fullscreen · <kbd>R</kbd> randomize
+      <kbd>Space</kbd> play · <kbd>V</kbd> mode · <kbd>S</kbd> stereo · <kbd>C</kbd> controls · <kbd>H</kbd> hide UI · <kbd>F</kbd> fullscreen · <kbd>R</kbd> randomize
     </p>
   </div>
 </div>
@@ -259,7 +259,10 @@ const DEFAULTS = {
   // bars
   barCount: 96, barGap: 0.3, barRadius: 6, mirror: false, caps: true, floorGlow: true,
   // shape / motion
-  rotation: 0.25, glow: 16, trail: 0.4, lineWidth: 3, pulse: 0.45, particles: 220,
+  rotation: 0.25, glow: 16, trail: 0.4, lineWidth: 3, pulse: 0.45,
+  particles: 220, particleSpeed: 1,
+  // stereo: split every mode into left/right channels, mirrored about centre
+  stereo: false,
   // color
   palette: 'cover', c1: '#7c5cff', c2: '#00d4ff', c3: '#ff4d8d',
   colorCycle: 0, colorSpread: 1, saturate: 1, brightness: 1,
@@ -272,10 +275,12 @@ const DEFAULTS = {
 const SCHEMA = [
   { title: 'Mode', open: true, items: [
     { k: 'mode', t: 'select', label: 'Visual', options: MODES },
+    { k: 'stereo',      t: 'toggle', label: 'Stereo split' },
     { k: 'pulse',       t: 'range', label: 'Bass pulse',  min: 0, max: 1.5, step: .01 },
     { k: 'rotation',    t: 'range', label: 'Rotation',    min: -2, max: 2,  step: .01, show: c => ['radial','blob','rings','particles'].includes(c.mode) },
     { k: 'lineWidth',   t: 'range', label: 'Line weight', min: 1, max: 14,  step: .5,  show: c => ['wave','blob','rings'].includes(c.mode) },
-    { k: 'particles',   t: 'range', label: 'Particles',   min: 0, max: 700, step: 10,  show: c => c.mode === 'particles' },
+    { k: 'particles',     t: 'range', label: 'Particles', min: 0, max: 2000, step: 10, show: c => c.mode === 'particles' },
+    { k: 'particleSpeed', t: 'range', label: 'Speed',     min: .1, max: 4, step: .05,  show: c => c.mode === 'particles' },
   ]},
   { title: 'Bars', open: true, show: c => ['bars','radial'].includes(c.mode), items: [
     { k: 'barCount',  t: 'range',  label: 'Count',      min: 12, max: 256, step: 1 },
@@ -347,8 +352,10 @@ const state = {
   bass: 0, mid: 0, treble: 0, level: 0,
   bassAvg: 0, beat: 0, lastBeat: 0,
   t: 0, spin: 0, dt: 1 / 60,
-  peaks: new Float32Array(256),
-  peakV: new Float32Array(256),
+  // Two slots of 256: mono/left uses the first, right channel the second.
+  peaks: new Float32Array(512),
+  peakV: new Float32Array(512),
+  levelL: 0, levelR: 0,
   parts: [],
   shocks: [],
 };
@@ -357,8 +364,10 @@ const state = {
 
 const audioEl = $('#audio');
 let ctxA = null, analyser = null, monitor = null;
+let stereoBus = null, splitter = null, analyserL = null, analyserR = null;
 let elSource = null, streamSource = null, activeStream = null;
 let freqData = null, timeData = null;
+let freqL = null, freqR = null, timeL = null, timeR = null;
 
 function ensureAudio() {
   if (ctxA) return ctxA;
@@ -367,6 +376,23 @@ function ensureAudio() {
   monitor = ctxA.createGain();
   analyser.connect(monitor);
   monitor.connect(ctxA.destination);
+
+  // Per-channel analysis runs off a parallel branch that never reaches the
+  // destination, so it costs nothing audibly. The bus in front of the splitter
+  // is what makes mono sources work: a ChannelSplitter is hard-wired to
+  // "discrete" interpretation, which would leave R silent for mono input, so
+  // this up-mixes 1->2 with "speakers" rules (L and R both get the signal).
+  stereoBus = ctxA.createGain();
+  stereoBus.channelCount = 2;
+  stereoBus.channelCountMode = 'explicit';
+  stereoBus.channelInterpretation = 'speakers';
+  splitter = ctxA.createChannelSplitter(2);
+  analyserL = ctxA.createAnalyser();
+  analyserR = ctxA.createAnalyser();
+  stereoBus.connect(splitter);
+  splitter.connect(analyserL, 0);
+  splitter.connect(analyserR, 1);
+
   applyAnalyser();
   return ctxA;
 }
@@ -374,14 +400,22 @@ function ensureAudio() {
 function applyAnalyser() {
   if (!analyser) return;
   const size = clamp(+cfg.fftSize, 32, 32768);
-  if (analyser.fftSize !== size) analyser.fftSize = size;
-  analyser.smoothingTimeConstant = clamp(+cfg.smoothing, 0, 0.99);
+  const smooth = clamp(+cfg.smoothing, 0, 0.99);
   // The analyser requires min < max, so nudge if the user crosses them.
   const min = Math.min(+cfg.minDb, +cfg.maxDb - 5);
-  analyser.minDecibels = min;
-  analyser.maxDecibels = +cfg.maxDb;
+  for (const a of [analyser, analyserL, analyserR]) {
+    if (!a) continue;
+    if (a.fftSize !== size) a.fftSize = size;
+    a.smoothingTimeConstant = smooth;
+    a.minDecibels = min;
+    a.maxDecibels = +cfg.maxDb;
+  }
   freqData = new Uint8Array(analyser.frequencyBinCount);
   timeData = new Uint8Array(analyser.fftSize);
+  freqL = new Uint8Array(analyser.frequencyBinCount);
+  freqR = new Uint8Array(analyser.frequencyBinCount);
+  timeL = new Uint8Array(analyser.fftSize);
+  timeR = new Uint8Array(analyser.fftSize);
 }
 
 function disconnectStream() {
@@ -395,6 +429,7 @@ function useFileSource() {
   if (!elSource) elSource = ctxA.createMediaElementSource(audioEl);
   try { elSource.disconnect(); } catch {}
   elSource.connect(analyser);
+  elSource.connect(stereoBus);
   monitor.gain.value = 1;             // we want to hear the file
   state.sourceKind = 'file';
   syncSourceUI();
@@ -433,6 +468,7 @@ async function useStreamSource(kind) {
   activeStream = stream;
   streamSource = ctxA.createMediaStreamSource(stream);
   streamSource.connect(analyser);
+  streamSource.connect(stereoBus);
   monitor.gain.value = 0;             // never route mic/tab back to the speakers
   state.sourceKind = kind;
 
@@ -789,9 +825,10 @@ function rebuildRamp() {
 }
 
 /** Sample the active palette at t∈[0,1], applying drift/saturation/brightness. */
-function colorAt(t, alpha = 1) {
+const _rgbOut = [255, 255, 255];
+function colorRGB(t) {
   const p = state.ramp;
-  if (!p.length) return `rgba(255,255,255,${alpha})`;
+  if (!p.length) { _rgbOut[0] = _rgbOut[1] = _rgbOut[2] = 255; return _rgbOut; }
   t = cfg.colorSpread <= 0 ? 0 : ((t / cfg.colorSpread) % 1 + 1) % 1;
   const x = t * (p.length - 1);
   const i = Math.floor(x), f = x - i;
@@ -804,7 +841,71 @@ function colorAt(t, alpha = 1) {
     l = clamp(l * cfg.brightness, 0, 1);
     [r, g, bl] = hsl2rgb(h, s, l);
   }
-  return `rgba(${r|0},${g|0},${bl|0},${alpha})`;
+  _rgbOut[0] = r | 0; _rgbOut[1] = g | 0; _rgbOut[2] = bl | 0;
+  return _rgbOut;
+}
+
+function colorAt(t, alpha = 1) {
+  const c = colorRGB(t);
+  return `rgba(${c[0]},${c[1]},${c[2]},${alpha})`;
+}
+
+/* Pre-rendered glow sprites. Canvas shadowBlur is per-draw-call expensive and
+   pathological under a 'lighter' composite — a few hundred shadowed circles
+   per frame cost seconds, not milliseconds. Stamping a cached radial-gradient
+   bitmap gives the same look for the price of a drawImage. */
+const SPRITE_STEPS = 24;
+let sprites = [], spriteKey = '', spriteRad = 0;
+
+function buildSprites() {
+  const glow = clamp(cfg.glow, 0, 44);
+  const R = Math.ceil(5 + glow * 1.1);
+  spriteRad = R;
+  sprites = [];
+  for (let i = 0; i < SPRITE_STEPS; i++) {
+    const c = document.createElement('canvas');
+    c.width = c.height = R * 2;
+    const g = c.getContext('2d');
+    const col = colorRGB(i / (SPRITE_STEPS - 1));
+    const [r, gg, b] = col;
+    const core = clamp(0.30 - glow * 0.004, 0.10, 0.30);
+    const grd = g.createRadialGradient(R, R, 0, R, R, R);
+    grd.addColorStop(0, `rgba(${r},${gg},${b},1)`);
+    grd.addColorStop(core, `rgba(${r},${gg},${b},0.65)`);
+    grd.addColorStop(1, `rgba(${r},${gg},${b},0)`);
+    g.fillStyle = grd;
+    g.fillRect(0, 0, R * 2, R * 2);
+    sprites.push(c);
+  }
+}
+
+function ensureSprites() {
+  // Hue drift animates the palette, so fold a coarse time step into the key
+  // rather than rebuilding 24 canvases every frame.
+  const drift = cfg.colorCycle ? Math.round(state.t * 6) : 0;
+  const key = [cfg.glow, cfg.palette, cfg.colorSpread, cfg.saturate, cfg.brightness,
+               cfg.c1, cfg.c2, cfg.c3, state.ramp.length, state.coverURL, drift].join('|');
+  if (key !== spriteKey) { spriteKey = key; buildSprites(); }
+}
+
+const spriteFor = t => sprites[clamp(Math.round(((t % 1) + 1) % 1 * (SPRITE_STEPS - 1)), 0, SPRITE_STEPS - 1)];
+
+/* Cheap bloom for strokes: a couple of wide, low-alpha passes under the
+   'lighter' composite read like a glow without touching shadowBlur. */
+function strokeBloom(trace, t, width, alpha = 1) {
+  const c = colorRGB(t);
+  const rgb = `${c[0]},${c[1]},${c[2]}`;
+  if (cfg.glow > 0) {
+    ctx.lineWidth = width + cfg.glow * 0.55;
+    ctx.strokeStyle = `rgba(${rgb},${0.055 * alpha})`;
+    trace(); ctx.stroke();
+    ctx.lineWidth = width + cfg.glow * 0.22;
+    ctx.strokeStyle = `rgba(${rgb},${0.11 * alpha})`;
+    trace(); ctx.stroke();
+  }
+  ctx.lineWidth = width;
+  ctx.strokeStyle = `rgba(${rgb},${alpha})`;
+  trace(); ctx.stroke();
 }
 
 /* --------------------------------------------------------- cover handling -- */
@@ -1077,9 +1178,13 @@ addEventListener('resize', resize);
 
 /** Fold the FFT bins down to `n` bars, optionally on a log frequency axis. */
 const bars = new Float32Array(512);
-function computeBars(n) {
-  if (!freqData) return;
-  const bins = freqData.length;
+const barsL = new Float32Array(512);
+const barsR = new Float32Array(512);
+function computeBars(n, src, out) {
+  src = src || freqData;
+  out = out || bars;
+  if (!src) return;
+  const bins = src.length;
   const nyquist = (ctxA ? ctxA.sampleRate : 48000) / 2;
   const fMin = 28, fMax = Math.min(16500, nyquist);
   for (let i = 0; i < n; i++) {
@@ -1093,22 +1198,26 @@ function computeBars(n) {
     }
     let a = Math.floor(lo), b = Math.max(a + 1, Math.ceil(hi));
     let m = 0;
-    for (let j = a; j < b && j < bins; j++) if (freqData[j] > m) m = freqData[j];
+    for (let j = a; j < b && j < bins; j++) if (src[j] > m) m = src[j];
     // A gentle high-frequency lift keeps the top octaves from vanishing.
     const tilt = 1 + (i / n) * 0.25;
-    bars[i] = clamp((m / 255) * cfg.sensitivity * tilt, 0, 1);
+    out[i] = clamp((m / 255) * cfg.sensitivity * tilt, 0, 1);
   }
 }
 
-function bandEnergy(fromHz, toHz) {
-  if (!freqData || !ctxA) return 0;
-  const bins = freqData.length, nyq = ctxA.sampleRate / 2;
+function bandEnergy(fromHz, toHz, src) {
+  src = src || freqData;
+  if (!src || !ctxA) return 0;
+  const bins = src.length, nyq = ctxA.sampleRate / 2;
   const a = Math.max(0, Math.floor(fromHz / nyq * bins));
   const b = Math.min(bins, Math.ceil(toHz / nyq * bins));
   let s = 0;
-  for (let i = a; i < b; i++) s += freqData[i];
+  for (let i = a; i < b; i++) s += src[i];
   return b > a ? s / (b - a) / 255 : 0;
 }
+
+/** True when we have live per-channel data to draw from. */
+const stereoOn = () => cfg.stereo && !!analyserL;
 
 function analyse(dt) {
   if (!analyser) return;
@@ -1119,6 +1228,23 @@ function analyse(dt) {
   state.mid    = bandEnergy(160, 2000) * cfg.sensitivity;
   state.treble = bandEnergy(2000, 12000) * cfg.sensitivity;
   state.level  = (state.bass * 1.4 + state.mid + state.treble * 0.7) / 3;
+
+  if (stereoOn()) {
+    analyserL.getByteFrequencyData(freqL);
+    analyserR.getByteFrequencyData(freqR);
+    analyserL.getByteTimeDomainData(timeL);
+    analyserR.getByteTimeDomainData(timeR);
+    // Weighted the same way as the mono level — a single wide band average
+    // is dominated by the empty top octaves and barely moves.
+    const lvl = src => {
+      const b = bandEnergy(20, 160, src), m = bandEnergy(160, 2000, src), t = bandEnergy(2000, 12000, src);
+      return clamp((b * 1.4 + m + t * 0.7) / 3 * cfg.sensitivity, 0, 1);
+    };
+    state.levelL = lvl(freqL);
+    state.levelR = lvl(freqR);
+  } else {
+    state.levelL = state.levelR = state.level;
+  }
 
   // Beat = bass energy spiking above its own short-term average.
   state.bassAvg = lerp(state.bassAvg, state.bass, 1 - Math.pow(0.001, dt));
@@ -1211,12 +1337,6 @@ function drawVignette() {
   ctx.fillRect(0, 0, W, H);
 }
 
-const setGlow = (color, mult = 1) => {
-  ctx.shadowBlur = cfg.glow * mult * DPR;
-  ctx.shadowColor = cfg.glow > 0 ? color : 'transparent';
-};
-const clearGlow = () => { ctx.shadowBlur = 0; ctx.shadowColor = 'transparent'; };
-
 function roundRect(x, y, w, h, r) {
   r = Math.min(r, w / 2, Math.abs(h) / 2);
   ctx.beginPath();
@@ -1228,26 +1348,49 @@ function roundRect(x, y, w, h, r) {
 
 function drawBars() {
   const n = cfg.barCount | 0;
-  computeBars(n);
-  const slot = W / n;
-  const bw = Math.max(1, slot * (1 - cfg.barGap));
-  const off = (slot - bw) / 2;
   const baseY = cfg.mirror ? H / 2 : H * 0.96;
   const maxH = (cfg.mirror ? H / 2 : H * 0.9) * (1 + state.bass * 0.12 * cfg.pulse);
 
+  if (stereoOn()) {
+    // Low frequencies meet at the centre line, each channel running outward.
+    const half = Math.max(4, n >> 1);
+    computeBars(half, freqL, barsL);
+    computeBars(half, freqR, barsR);
+    const slot = (W / 2) / half;
+    barRun(barsL, half, W / 2, -1, slot, baseY, maxH, 0);
+    barRun(barsR, half, W / 2, +1, slot, baseY, maxH, 256);
+  } else {
+    computeBars(n);
+    barRun(bars, n, 0, +1, W / n, baseY, maxH, 0);
+  }
+}
+
+/** Draw one run of bars from x0, marching in `dir`, into a shared peaks slot. */
+function barRun(data, n, x0, dir, slot, baseY, maxH, pOff) {
+  const bw = Math.max(1, slot * (1 - cfg.barGap));
+  const off = (slot - bw) / 2;
+
   for (let i = 0; i < n; i++) {
-    const v = bars[i];
+    const v = data[i];
     const h = Math.max(2, v * maxH);
-    const x = i * slot + off;
+    const x = (dir > 0 ? x0 + i * slot : x0 - (i + 1) * slot) + off;
     const col = colorAt(i / n);
-    setGlow(col, 0.6 + v);
     ctx.fillStyle = col;
+
+    // Halo drawn as an expanded low-alpha copy rather than shadowBlur.
+    if (cfg.glow > 0) {
+      const gx = cfg.glow * 0.28;
+      ctx.globalAlpha = 0.09;
+      roundRect(x - gx, baseY - h - gx, bw + gx * 2, h + gx * (cfg.mirror ? 2 : 1), cfg.barRadius + gx);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
     roundRect(x, baseY - h, bw, h, cfg.barRadius);
     ctx.fill();
     if (cfg.mirror) { roundRect(x, baseY, bw, h, cfg.barRadius); ctx.fill(); }
 
     if (cfg.floorGlow && !cfg.mirror) {
-      clearGlow();
       ctx.save();
       ctx.globalAlpha = 0.22;
       ctx.scale(1, -1);
@@ -1262,71 +1405,103 @@ function drawBars() {
 
     if (cfg.caps) {
       // Peak markers fall under gravity until the bar catches back up.
-      const p = state.peaks[i] || 0;
-      if (v >= p) { state.peaks[i] = v; state.peakV[i] = 0; }
-      else { state.peakV[i] += state.dt * 1.6; state.peaks[i] = Math.max(v, p - state.peakV[i] * state.dt); }
-      const py = baseY - Math.max(2, state.peaks[i] * maxH) - 5;
-      clearGlow();
+      const k = pOff + i;
+      const p = state.peaks[k] || 0;
+      if (v >= p) { state.peaks[k] = v; state.peakV[k] = 0; }
+      else { state.peakV[k] += state.dt * 1.6; state.peaks[k] = Math.max(v, p - state.peakV[k] * state.dt); }
+      const py = baseY - Math.max(2, state.peaks[k] * maxH) - 5;
       ctx.fillStyle = 'rgba(255,255,255,.82)';
       roundRect(x, py, bw, 3, 2);
       ctx.fill();
-      if (cfg.mirror) { roundRect(x, baseY + Math.max(2, state.peaks[i] * maxH) + 2, bw, 3, 2); ctx.fill(); }
+      if (cfg.mirror) { roundRect(x, baseY + Math.max(2, state.peaks[k] * maxH) + 2, bw, 3, 2); ctx.fill(); }
     }
   }
-  clearGlow();
 }
 
 function drawRadial() {
   const n = cfg.barCount | 0;
-  computeBars(n);
   const cx = W / 2, cy = H / 2;
   const R = Math.min(W, H) * (0.20 + state.bass * 0.06 * cfg.pulse);
   const maxLen = Math.min(W, H) * 0.30;
-  const step = (Math.PI * 2) / n;
-  const gap = step * cfg.barGap;
 
   ctx.save();
   ctx.translate(cx, cy);
   ctx.rotate(state.spin);
+  if (stereoOn()) {
+    // Both channels start at the top and sweep down their own side.
+    const half = Math.max(4, n >> 1);
+    computeBars(half, freqL, barsL);
+    computeBars(half, freqR, barsR);
+    radialRun(barsR, half, -Math.PI / 2, Math.PI, R, maxLen, 256);
+    radialRun(barsL, half, -Math.PI / 2, -Math.PI, R, maxLen, 0);
+  } else {
+    computeBars(n);
+    radialRun(bars, n, -Math.PI / 2, Math.PI * 2, R, maxLen, 0);
+  }
+  ctx.restore();
+  drawCenterArt(R * 0.92);
+}
+
+function radialRun(data, n, a0, sweep, R, maxLen, pOff) {
+  const step = sweep / n;
+  const width = Math.max(1, Math.abs(step) * (1 - cfg.barGap) * R);
+  ctx.lineCap = cfg.barRadius > 4 ? 'round' : 'butt';
+
   for (let i = 0; i < n; i++) {
-    const v = bars[i];
+    const v = data[i];
     const len = Math.max(2, v * maxLen);
-    const a = i * step;
-    const col = colorAt(i / n);
-    setGlow(col, 0.5 + v);
-    ctx.strokeStyle = col;
-    ctx.lineCap = cfg.barRadius > 4 ? 'round' : 'butt';
-    ctx.lineWidth = Math.max(1, (step - gap) * R);
+    const a = a0 + step * (i + 0.5);
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const c = colorRGB(i / n);
+    const rgb = `${c[0]},${c[1]},${c[2]}`;
+
+    if (cfg.glow > 0) {
+      ctx.strokeStyle = `rgba(${rgb},0.13)`;
+      ctx.lineWidth = width + cfg.glow * 0.4;
+      ctx.beginPath();
+      ctx.moveTo(ca * R, sa * R);
+      ctx.lineTo(ca * (R + len), sa * (R + len));
+      ctx.stroke();
+    }
+    ctx.strokeStyle = `rgba(${rgb},1)`;
+    ctx.lineWidth = width;
     ctx.beginPath();
-    ctx.moveTo(Math.cos(a) * R, Math.sin(a) * R);
-    ctx.lineTo(Math.cos(a) * (R + len), Math.sin(a) * (R + len));
+    ctx.moveTo(ca * R, sa * R);
+    ctx.lineTo(ca * (R + len), sa * (R + len));
     ctx.stroke();
+
     if (cfg.caps) {
-      const p = state.peaks[i] || 0;
-      state.peaks[i] = v >= p ? v : Math.max(v, p - state.dt * 0.55);
-      const pr = R + Math.max(2, state.peaks[i] * maxLen) + 6;
-      clearGlow();
+      const k = pOff + i;
+      const p = state.peaks[k] || 0;
+      state.peaks[k] = v >= p ? v : Math.max(v, p - state.dt * 0.55);
+      const pr = R + Math.max(2, state.peaks[k] * maxLen) + 6;
       ctx.fillStyle = 'rgba(255,255,255,.8)';
       ctx.beginPath();
-      ctx.arc(Math.cos(a) * pr, Math.sin(a) * pr, 1.8, 0, 7);
+      ctx.arc(ca * pr, sa * pr, 1.8, 0, 7);
       ctx.fill();
     }
   }
-  ctx.restore();
-  clearGlow();
-  drawCenterArt(R * 0.92);
 }
 
 function drawWave() {
   if (!timeData) return;
-  const cx = H / 2;
+  if (stereoOn()) {
+    // Left above the centre line, right below — mirrored about the middle.
+    waveTrace(timeL, H * 0.30, 0.5);
+    waveTrace(timeR, H * 0.70, 0.5);
+  } else {
+    waveTrace(timeData, H / 2, 1);
+  }
+}
+
+function waveTrace(td, cx, ampScale) {
   const layers = [
     { amp: 1.0, alpha: 1.0, t: 0.0, w: 1.0 },
     { amp: 0.7, alpha: 0.45, t: 0.45, w: 0.7 },
     { amp: 0.45, alpha: 0.28, t: 0.8, w: 0.5 },
   ];
-  const N = timeData.length;
-  const scale = H * 0.34 * cfg.sensitivity * (1 + state.bass * 0.35 * cfg.pulse);
+  const N = td.length;
+  const scale = H * 0.34 * ampScale * cfg.sensitivity * (1 + state.bass * 0.35 * cfg.pulse);
 
   // Trigger on a rising zero crossing like a real scope, so the trace holds
   // still instead of skating sideways, and only show a window of the buffer —
@@ -1334,35 +1509,42 @@ function drawWave() {
   const span = Math.min(N, 2048);
   let trig = 0;
   for (let i = 0; i < N - span - 1; i++) {
-    if (timeData[i] < 128 && timeData[i + 1] >= 128) { trig = i; break; }
+    if (td[i] < 128 && td[i + 1] >= 128) { trig = i; break; }
   }
   const stride = Math.max(1, Math.floor(span / Math.max(2, W * 0.8)));
 
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
   for (const L of layers) {
-    const col = colorAt(L.t, L.alpha);
-    ctx.strokeStyle = col;
-    ctx.lineWidth = cfg.lineWidth * L.w;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    setGlow(col, 1);
-    ctx.beginPath();
-    let first = true;
-    for (let i = 0; i < span; i += stride) {
-      const x = (i / (span - 1)) * W;
-      const y = cx + ((timeData[trig + i] - 128) / 128) * scale * L.amp;
-      first ? (ctx.moveTo(x, y), first = false) : ctx.lineTo(x, y);
-    }
-    ctx.stroke();
+    const trace = () => {
+      ctx.beginPath();
+      let first = true;
+      for (let i = 0; i < span; i += stride) {
+        const x = (i / (span - 1)) * W;
+        const y = cx + ((td[trig + i] - 128) / 128) * scale * L.amp;
+        first ? (ctx.moveTo(x, y), first = false) : ctx.lineTo(x, y);
+      }
+    };
+    strokeBloom(trace, L.t, cfg.lineWidth * L.w, L.alpha);
   }
-  clearGlow();
 }
 
 /** Sample the spectrum into a symmetric polar outline. */
 function polarPoints(count) {
   const half = count >> 1;
-  computeBars(half);
+  let srcL, srcR;
+  if (stereoOn()) {
+    computeBars(half, freqL, barsL);
+    computeBars(half, freqR, barsR);
+    srcL = barsL; srcR = barsR;
+  } else {
+    computeBars(half);
+    srcL = srcR = bars;
+  }
+  // Index 0 sits at the top (see drawBlob), so the first half sweeps down the
+  // right side and the mirrored half sweeps down the left.
   const raw = new Float32Array(count);
-  for (let i = 0; i < half; i++) { raw[i] = bars[i]; raw[count - 1 - i] = bars[i]; }
+  for (let i = 0; i < half; i++) { raw[i] = srcR[i]; raw[count - 1 - i] = srcL[i]; }
   // Circular smoothing so the outline stays organic instead of spiky.
   const out = new Float32Array(count);
   const K = 3;
@@ -1387,7 +1569,7 @@ function drawBlob() {
 
   const pts = [];
   for (let i = 0; i < N; i++) {
-    const a = (i / N) * Math.PI * 2 + state.spin;
+    const a = (i / N) * Math.PI * 2 - Math.PI / 2 + state.spin;
     const r = base + v[i] * amp;
     pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]);
   }
@@ -1413,33 +1595,23 @@ function drawBlob() {
   g.addColorStop(0, colorAt(0.1, 0.55));
   g.addColorStop(0.55, colorAt(0.4, 0.26));
   g.addColorStop(1, colorAt(0.8, 0.03));
-  setGlow(colorAt(0.5), 1.2);
   trace();
   ctx.fillStyle = g;
   ctx.fill();
 
   // Concentric echoes at different palette positions read far better than one
   // rim — a single stroke over a blended fill just turns muddy.
-  ctx.lineWidth = cfg.lineWidth;
-  ctx.strokeStyle = colorAt(0.92, 0.95);
-  ctx.stroke();
-  ctx.lineWidth = cfg.lineWidth * 0.7;
-  ctx.strokeStyle = colorAt(0.55, 0.6);
-  trace(0.82);
-  ctx.stroke();
-  ctx.lineWidth = cfg.lineWidth * 0.45;
-  ctx.strokeStyle = colorAt(0.2, 0.4);
-  trace(0.66);
-  ctx.stroke();
-  clearGlow();
+  strokeBloom(() => trace(),     0.92, cfg.lineWidth, 0.95);
+  strokeBloom(() => trace(0.82), 0.55, cfg.lineWidth * 0.7, 0.6);
+  strokeBloom(() => trace(0.66), 0.2,  cfg.lineWidth * 0.45, 0.4);
   drawCenterArt(base * 0.72);
 }
 
 function spawnBurst() {
-  const n = Math.min(40, cfg.particles / 6);
+  const n = Math.min(60, cfg.particles / 6);
   for (let i = 0; i < n; i++) {
     const a = Math.random() * Math.PI * 2;
-    const sp = rnd(60, 260) * (0.6 + state.bass);
+    const sp = rnd(60, 260) * (0.6 + state.bass) * cfg.particleSpeed;
     state.parts.push({
       x: W / 2, y: H / 2, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
       life: 1, size: rnd(1.2, 3.6), c: Math.random(),
@@ -1457,63 +1629,78 @@ function drawParticles() {
       life: 1, size: rnd(0.8, 2.6), c: Math.random(), amb: true,
     });
   }
+
+  ensureSprites();
   const dt = state.dt;
-  const push = 1 + state.level * 3;
   const cx = W / 2, cy = H / 2;
   const spin = cfg.rotation * 0.9;
+  const speed = cfg.particleSpeed;
+  const cosS = Math.cos(spin * dt), sinS = Math.sin(spin * dt);
+  const parts = state.parts;
 
-  for (let i = state.parts.length - 1; i >= 0; i--) {
-    const p = state.parts[i];
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    // In stereo each half of the field answers to its own channel.
+    const lvl = stereoOn() ? (p.x < cx ? state.levelL : state.levelR) : state.level;
+    const push = (1 + lvl * 3) * speed;
+
     if (spin) {
       const dx = p.x - cx, dy = p.y - cy;
-      p.x = cx + dx * Math.cos(spin * dt) - dy * Math.sin(spin * dt);
-      p.y = cy + dx * Math.sin(spin * dt) + dy * Math.cos(spin * dt);
+      p.x = cx + dx * cosS - dy * sinS;
+      p.y = cy + dx * sinS + dy * cosS;
     }
     p.x += p.vx * dt * push;
     p.y += p.vy * dt * push;
+
+    let alpha;
     if (!p.amb) {
       p.vx *= 1 - 1.2 * dt; p.vy *= 1 - 1.2 * dt;
-      p.life -= dt * 0.6;
-      if (p.life <= 0) { state.parts.splice(i, 1); continue; }
+      p.life -= dt * 0.6 * speed;
+      // Swap-and-pop: splice inside a reverse loop is O(n) per removal.
+      if (p.life <= 0) { parts[i] = parts[parts.length - 1]; parts.pop(); continue; }
+      alpha = p.life;
     } else {
       if (p.x < -20) p.x = W + 20; else if (p.x > W + 20) p.x = -20;
       if (p.y < -20) p.y = H + 20; else if (p.y > H + 20) p.y = -20;
-      if (state.parts.length > target) { state.parts.splice(i, 1); continue; }
+      if (parts.length > target) { parts[i] = parts[parts.length - 1]; parts.pop(); continue; }
+      alpha = 0.55 + lvl * 0.45;
     }
-    const s = p.size * (1 + state.level * 1.6 * cfg.pulse) * (p.amb ? 1 : p.life);
-    const col = colorAt(p.c, p.amb ? 0.55 + state.level * 0.45 : p.life);
-    setGlow(col, 0.5);
-    ctx.fillStyle = col;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, Math.max(0.4, s), 0, 7);
-    ctx.fill();
+
+    const s = Math.max(0.5, p.size * (1 + lvl * 1.6 * cfg.pulse) * (p.amb ? 1 : p.life));
+    const sp = spriteFor(p.c);
+    if (!sp) continue;
+    // Sprite is sized for the core dot plus its halo; scale the whole stamp.
+    const r = s * (spriteRad / 5);
+    ctx.globalAlpha = clamp(alpha, 0, 1);
+    ctx.drawImage(sp, p.x - r, p.y - r, r * 2, r * 2);
   }
-  clearGlow();
+  ctx.globalAlpha = 1;
 }
+
+const RING_BANDS = [[20, 90], [90, 250], [250, 700], [700, 2000], [2000, 6000], [6000, 14000]];
+const bandsOf = src => RING_BANDS.map(([a, b]) => clamp(bandEnergy(a, b, src) * cfg.sensitivity, 0, 1));
 
 function drawRings() {
   const cx = W / 2, cy = H / 2;
   const R = Math.min(W, H) * 0.42;
-  const bands = [
-    bandEnergy(20, 90), bandEnergy(90, 250), bandEnergy(250, 700),
-    bandEnergy(700, 2000), bandEnergy(2000, 6000), bandEnergy(6000, 14000),
-  ].map(v => clamp(v * cfg.sensitivity, 0, 1));
 
   ctx.save();
   ctx.translate(cx, cy);
   ctx.rotate(state.spin);
-  for (let i = 0; i < bands.length; i++) {
-    const t = i / (bands.length - 1);
-    const r = R * (0.22 + t * 0.72) * (1 + bands[i] * 0.16 * cfg.pulse);
-    const col = colorAt(t, 0.35 + bands[i] * 0.65);
-    setGlow(col, 1);
-    ctx.strokeStyle = col;
-    ctx.lineWidth = cfg.lineWidth * (0.6 + bands[i] * 3);
-    ctx.beginPath();
-    // A partial arc per band reads better than a closed circle.
-    const span = Math.PI * (1.15 + bands[i] * 0.8);
-    ctx.arc(0, 0, r, -span / 2 + i * 0.7, span / 2 + i * 0.7);
-    ctx.stroke();
+  if (stereoOn()) {
+    // Each ring splits down the middle: left half from L, right half from R.
+    const bl = bandsOf(freqL), br = bandsOf(freqR);
+    for (let i = 0; i < bl.length; i++) {
+      ringArc(bl[i], i, bl.length, R, Math.PI / 2, Math.PI);
+      ringArc(br[i], i, br.length, R, -Math.PI / 2, Math.PI);
+    }
+  } else {
+    const bands = bandsOf(freqData);
+    for (let i = 0; i < bands.length; i++) {
+      // A partial arc per band reads better than a closed circle.
+      const span = Math.PI * (1.15 + bands[i] * 0.8);
+      ringArc(bands[i], i, bands.length, R, -span / 2 + i * 0.7, span);
+    }
   }
   ctx.restore();
 
@@ -1523,16 +1710,17 @@ function drawRings() {
     s.r += state.dt * Math.min(W, H) * 0.55;
     s.a -= state.dt * 0.85;
     if (s.a <= 0) { state.shocks.splice(i, 1); continue; }
-    const col = colorAt(s.c, s.a * 0.8);
-    setGlow(col, 0.7);
-    ctx.strokeStyle = col;
-    ctx.lineWidth = cfg.lineWidth * 0.8;
-    ctx.beginPath();
-    ctx.arc(cx, cy, s.r, 0, 7);
-    ctx.stroke();
+    strokeBloom(() => { ctx.beginPath(); ctx.arc(cx, cy, s.r, 0, 7); },
+                s.c, cfg.lineWidth * 0.8, s.a * 0.8);
   }
-  clearGlow();
   drawCenterArt(R * 0.2);
+}
+
+function ringArc(v, i, n, R, a0, span) {
+  const t = i / Math.max(1, n - 1);
+  const r = R * (0.22 + t * 0.72) * (1 + v * 0.16 * cfg.pulse);
+  strokeBloom(() => { ctx.beginPath(); ctx.arc(0, 0, r, a0, a0 + span); },
+              t, cfg.lineWidth * (0.6 + v * 3), 0.35 + v * 0.65);
 }
 
 function drawCenterArt(radius) {
@@ -1702,6 +1890,11 @@ addEventListener('keydown', e => {
   else if (k === 'h') $('#btnHide').click();
   else if (k === 'c') $('#btnPanel').click();
   else if (k === 'r') randomize();
+  else if (k === 's') {
+    cfg.stereo = !cfg.stereo;
+    onChange('*');
+    toast(cfg.stereo ? 'Stereo split on — left and right channels' : 'Stereo split off');
+  }
   else if (k === 'o') openFile();
   else if (k === 'v') {
     const list = MODES.map(m => m[0]);
