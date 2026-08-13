@@ -383,7 +383,7 @@ const DEFAULTS = {
   skin: 'none',                 // none | vinyl | cd | tape
   skinSize: 1, skinOpacity: 1, skinDim: 0.35,
   vinylCondition: 0.85, vinylRPM: 33, tonearm: true, vinylLabelArt: true,
-  cdSpin: 1, cdSheen: 0.65, cdArt: true,
+  cdSpin: 1, cdSheen: 0.65, cdArt: true, cdArtSpin: false,
   tapeQuality: 0.8, tapeSpin: 1,
 };
 
@@ -413,7 +413,8 @@ const SCHEMA = [
 
     { k: 'cdSpin',  t: 'range',  label: 'Spin',   min: 0, max: 3, step: .01, show: c => c.skin === 'cd' },
     { k: 'cdSheen', t: 'range',  label: 'Sheen',  min: 0, max: 1, step: .01, show: c => c.skin === 'cd' },
-    { k: 'cdArt',   t: 'toggle', label: 'Album art', show: c => c.skin === 'cd' },
+    { k: 'cdArt',     t: 'toggle', label: 'Album art', show: c => c.skin === 'cd' },
+    { k: 'cdArtSpin', t: 'toggle', label: 'Spin the art', show: c => c.skin === 'cd' && c.cdArt },
 
     { k: 'tapeQuality', t: 'range', label: 'Tape quality', min: 0, max: 1, step: .01, show: c => c.skin === 'tape' },
     { k: 'tapeSpin',    t: 'range', label: 'Reel speed',   min: 0, max: 3, step: .01, show: c => c.skin === 'tape' },
@@ -3091,19 +3092,26 @@ function drawCD() {
 
   ctx.save();
   ctx.translate(cx, cy);
-  ctx.rotate(state.cdAngle);
+  // The artwork can either turn with the disc (what a real CD does) or stay
+  // upright, because a spinning cover ends up sideways and unreadable.
+  ctx.rotate(cfg.cdArtSpin ? state.cdAngle : 0);
 
   ctx.beginPath();
-  ctx.arc(0, 0, R, 0, 7);
+  ctx.arc(0, 0, R, 0, Math.PI * 2);
   ctx.fillStyle = '#0e0e12';
   ctx.fill();
 
   // Album art fills the data area.
   if (cfg.cdArt && state.cover) {
     ctx.save();
+    // Two separate subpaths. Without the moveTo, canvas joins the end of the
+    // outer arc to the start of the inner one, and evenodd fills that
+    // connecting line into a wedge across the disc.
     ctx.beginPath();
-    ctx.arc(0, 0, R, 0, 7);
-    ctx.arc(0, 0, innerR, 0, 7, true);
+    ctx.moveTo(R, 0);
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
+    ctx.moveTo(innerR, 0);
+    ctx.arc(0, 0, innerR, 0, Math.PI * 2, true);
     ctx.clip('evenodd');
     const img = state.cover;
     const sc = Math.max((R * 2) / img.width, (R * 2) / img.height);
@@ -3119,26 +3127,38 @@ function drawCD() {
     ctx.fill();
   }
 
-  // Diffraction rainbow: wedges of shifting hue, cheap stand-in for a conic gradient.
+  // Everything from here spins regardless, so the disc still reads as turning
+  // even when the artwork is held upright.
+  ctx.rotate(cfg.cdArtSpin ? 0 : state.cdAngle);
+
+  // Diffraction sheen. Drawn as a couple of broad gradient bands rather than
+  // many pie wedges: wedges band into visible spokes over flat artwork, which
+  // reads as a rendering fault rather than iridescence.
   if (cfg.cdSheen > 0) {
-    const wedges = 72;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(R, 0);
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
+    ctx.moveTo(innerR, 0);
+    ctx.arc(0, 0, innerR, 0, Math.PI * 2, true);
+    ctx.clip('evenodd');
     ctx.globalCompositeOperation = 'lighter';
-    for (let i = 0; i < wedges; i++) {
-      const a = (i / wedges) * Math.PI * 2;
-      const hue = (i / wedges * 1.6 + state.t * 0.05) % 1;
-      const [r, g2, b] = hsl2rgb(hue, 0.95, 0.55);
-      // Tight opposing lobes: a real disc flares where the light catches it,
-      // it does not glow evenly all the way round.
-      const lobe = Math.pow(Math.abs(Math.sin(a + state.t * 0.5)), 8);
-      const strength = cfg.cdSheen * (0.012 + 0.40 * lobe);
-      ctx.fillStyle = `rgba(${r|0},${g2|0},${b|0},${strength})`;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.arc(0, 0, R, a, a + (Math.PI * 2) / wedges + 0.01);
-      ctx.closePath();
-      ctx.fill();
+    for (let band = 0; band < 2; band++) {
+      const a = state.t * 0.3 + band * Math.PI * 0.62;
+      const gx = Math.cos(a), gy = Math.sin(a);
+      const g2 = ctx.createLinearGradient(-R * gx, -R * gy, R * gx, R * gy);
+      const N = 8;
+      for (let i = 0; i <= N; i++) {
+        const [r, gg, bb] = hsl2rgb((i / N * 0.85 + state.t * 0.05 + band * 0.4) % 1, 0.95, 0.56);
+        // Bell-shaped alpha so each band fades out at its own edges.
+        const w = Math.pow(Math.sin((i / N) * Math.PI), 1.6);
+        const al = cfg.cdSheen * 0.34 * w;
+        g2.addColorStop(i / N, `rgba(${r|0},${gg|0},${bb|0},${al.toFixed(3)})`);
+      }
+      ctx.fillStyle = g2;
+      ctx.fillRect(-R, -R, R * 2, R * 2);
     }
-    ctx.globalCompositeOperation = 'source-over';
+    ctx.restore();
   }
 
   // Fine data-track rings.
@@ -3150,20 +3170,33 @@ function drawCD() {
     ctx.stroke();
   }
 
-  // Clear plastic hub and the hole.
+  // Clear plastic hub. A flat dark fill here reads as a smudge over bright
+  // artwork, so it gets a glassy gradient and a bright clamping ring instead.
+  const hub = ctx.createRadialGradient(-innerR * 0.3, -innerR * 0.3, innerR * 0.1, 0, 0, innerR);
+  hub.addColorStop(0, 'rgba(255,255,255,0.34)');
+  hub.addColorStop(0.55, 'rgba(210,222,240,0.16)');
+  hub.addColorStop(1, 'rgba(120,140,170,0.20)');
   ctx.beginPath();
-  ctx.arc(0, 0, innerR, 0, 7);
-  ctx.fillStyle = 'rgba(190,200,215,0.20)';
+  ctx.arc(0, 0, innerR, 0, Math.PI * 2);
+  ctx.fillStyle = hub;
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.42)';
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
+  // Stacking ring between hub and hole, as on a real disc.
   ctx.beginPath();
-  ctx.arc(0, 0, holeR, 0, 7);
-  ctx.fillStyle = '#05050a';
+  ctx.arc(0, 0, (innerR + holeR) / 2, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineWidth = Math.max(1, R * 0.012);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(0, 0, holeR, 0, Math.PI * 2);
+  ctx.fillStyle = '#07070c';
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 1.5;
   ctx.stroke();
 
   ctx.beginPath();
