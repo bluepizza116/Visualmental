@@ -65,6 +65,32 @@ around with it — set Rotation to 0 to keep the channels fixed in place.
 Analysis runs on a parallel branch of the audio graph that never reaches the
 output, so it costs nothing audible.
 
+## Library
+
+Press `L` or **☰ Library**. Drop a folder of music onto the window, or use
+**＋ Files** / **＋ Folder** — folder drops are walked recursively, so a whole
+collection can go in at once.
+
+Tracks are stored in IndexedDB and survive a reload. Metadata and audio live in
+separate stores: listing the library reads only the small records (title,
+artist, album, duration, and a 160px cover thumbnail), while the audio blob is
+fetched only for the track actually being played — otherwise opening the panel
+would pull hundreds of MB into memory.
+
+- **Search** filters on title, artist and album, and narrows the play queue too
+- **`[` / `]`** step to the previous / next track; a finished track auto-advances
+- Re-importing the same files is a no-op — tracks are keyed by name, size and
+  modified time
+- **✕** on a row removes that track; **Clear all** empties the library. Neither
+  touches the original files on disk
+- The footer shows the track count and how much storage is in use
+
+Prism asks for persistent storage on first import so the browser won't evict
+the library under storage pressure.
+
+Recorded tape notes are stored against the track, so they come back whenever
+that track is loaded — a dot in the library marks tracks that have one.
+
 ## Player skins
 
 A skin is an independent layer drawn over whichever spectrum mode is running —
@@ -102,8 +128,8 @@ reels whose tape packs shift from the left hub to the right as the track plays.
 heavier saturation, faster wow — plus visible grain.
 
 **Record note** captures a spoken annotation over the tape via `MediaRecorder`
-— what the song is about, who it's for. Kept for the session; it moves into the
-library in the next stage.
+— what the song is about, who it's for. Notes are stored against the track in
+the library and reload with it.
 
 ### CD
 
@@ -142,6 +168,8 @@ settings around. `🎲` randomizes the whole look.
 | `F` | Fullscreen |
 | `R` | Randomize |
 | `O` | Open a file |
+| `L` | Toggle the library |
+| `[` `]` | Previous / next track |
 
 The UI also fades out on its own after a few seconds of no input.
 
