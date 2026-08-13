@@ -43,6 +43,15 @@ say "creating venv at $VENV"
 "$VENV/bin/pip" install --quiet --upgrade yt-dlp
 say "yt-dlp $("$VENV/bin/python" -c 'import yt_dlp;print(yt_dlp.version.__version__)')"
 
+say "creating the API token"
+# Generated here, as root. The service user can read /etc/prism but not write
+# to it, so letting the daemon create this itself would fail on first start.
+if [ ! -s "$CONF/token" ]; then
+  python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > "$CONF/token"
+fi
+chown root:prism "$CONF/token"
+chmod 640 "$CONF/token"
+
 say "installing systemd unit"
 sed "s|/opt/visualmental|$REPO|g" "$REPO/server/prism-downloader.service" > "$UNIT"
 systemctl daemon-reload

@@ -377,6 +377,7 @@ const DEFAULTS = {
   bgMode: 'cover', bgBlur: 46, bgDim: 0.66, vignette: 0.5,
   // overlays
   showCover: true, showInfo: true,
+  showLyrics: true, lyricsAuto: true, lyricsSize: 1, lyricsPos: 'bottom', coverAuto: true,
 
   // player skin — an independent layer drawn over whichever spectrum mode is active
   skin: 'none',                 // none | vinyl | cd | tape
@@ -460,6 +461,17 @@ const SCHEMA = [
     { k: 'beatSens',    t: 'range',  label: 'Beat trigger',min: 1.05, max: 2.2, step: .01 },
     { k: 'logScale',    t: 'toggle', label: 'Log frequency' },
   ]},
+  { title: 'Lyrics & artwork', items: [
+    { k: 'showLyrics', t: 'toggle', label: 'Show lyrics' },
+    { k: 'lyricsAuto', t: 'toggle', label: 'Fetch automatically' },
+    { k: 'lyricsSize', t: 'range',  label: 'Text size', min: .6, max: 2, step: .05, show: c => c.showLyrics },
+    { k: 'lyricsPos',  t: 'select', label: 'Position', options: [['bottom','Lower third'],['center','Centred']], show: c => c.showLyrics },
+    { k: '_lyricsfetch', t: 'button', label: 'Look up lyrics now', action: () => loadLyrics(true) },
+    { k: '_lyricshint', t: 'note', label: 'Lyrics come from LRCLIB. Click a line to jump to it.' },
+    { k: 'coverAuto',  t: 'toggle', label: 'Auto-find cover art' },
+    { k: '_coverfetch', t: 'button', label: 'Find cover art now', action: () => findCover(true) },
+    { k: '_coverhint', t: 'note', label: 'Artwork lookup needs the download service (it proxies the image so palette extraction keeps working).' },
+  ]},
   { title: 'Presets', items: [
     { k: '_presets', t: 'presets' },
   ]},
@@ -499,6 +511,7 @@ const state = {
   spinDown: 0,                   // momentum left over from a flick
   dust: null,
   recording: false, annotation: null, annotationURL: null,
+  lyrics: null, lyricIdx: -1, lyricScroll: 0, lyricHits: [],
   parts: [],
   shocks: [],
 };
@@ -1380,6 +1393,7 @@ async function loadAudioFile(file, rec) {
   ttBuffer = null;
   if (state.annotationURL) URL.revokeObjectURL(state.annotationURL);
   state.annotation = state.annotationURL = null;
+  state.lyrics = null; state.lyricIdx = -1; state.lyricScroll = 0; state.lyricHits.length = 0;
   syncRecUI();
   // Awaited deliberately: the read is sub-millisecond, and leaving it to race
   // against the tag re-parse and worklet decode below made the note's arrival
@@ -1413,6 +1427,9 @@ async function loadAudioFile(file, rec) {
   try { await audioEl.play(); } catch {}
   ctxA && ctxA.resume();
   await syncEngine();
+
+  if (cfg.lyricsAuto) loadLyrics();
+  if (cfg.coverAuto && !state.cover) findCover();
 }
 
 /* ================================ library ================================= */
@@ -1420,7 +1437,7 @@ async function loadAudioFile(file, rec) {
    record on open, but the audio blobs are hundreds of MB and are only fetched
    for the track actually being played. */
 
-const DB_NAME = 'prism', DB_VER = 1;
+const DB_NAME = 'prism', DB_VER = 2;
 let dbp = null;
 
 function db() {
@@ -1432,6 +1449,7 @@ function db() {
       if (!d.objectStoreNames.contains('tracks')) d.createObjectStore('tracks', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('audio'))  d.createObjectStore('audio',  { keyPath: 'id' });
       if (!d.objectStoreNames.contains('notes'))  d.createObjectStore('notes',  { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('lyrics')) d.createObjectStore('lyrics', { keyPath: 'id' });
     };
     rq.onsuccess = () => res(rq.result);
     rq.onerror = () => rej(rq.error);
@@ -1746,6 +1764,131 @@ function stepTrack(dir) {
   const i = list.findIndex(t => t.id === library.playingId);
   const next = list[(i < 0 ? 0 : i + dir + list.length) % list.length];
   if (next) playFromLibrary(next.id);
+}
+
+/* ============================ lyrics & artwork ============================ */
+/* Lyrics come from LRCLIB, which is keyless and CORS-enabled, so the browser
+   asks it directly and this works with no server at all. Artwork cannot: the
+   art CDNs send no CORS headers, so an <img> from them taints the canvas and
+   getImageData throws — which would silently drop the palette back to defaults.
+   So cover lookup goes through the daemon, which refetches server-side and
+   hands the bytes back same-origin. */
+
+function parseLRC(text) {
+  const out = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    const stamps = [...line.matchAll(/\[(\d+):(\d{1,2}(?:[.:]\d{1,3})?)\]/g)];
+    if (!stamps.length) continue;
+    const body = line.replace(/\[[^\]]*\]/g, '').trim();
+    for (const m of stamps) {
+      const t = parseInt(m[1], 10) * 60 + parseFloat(m[2].replace(':', '.'));
+      if (isFinite(t)) out.push({ t, text: body });
+    }
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+
+function setLyrics(data, id) {
+  if (state.trackId !== id) return;              // track changed while fetching
+  state.lyrics = data;
+  state.lyricIdx = -1;
+  state.lyricScroll = 0;
+}
+
+async function lyricsLookup(artist, track, album, duration) {
+  const qs = new URLSearchParams({
+    artist_name: artist || '', track_name: track || '',
+    album_name: album || '', duration: Math.round(duration || 0),
+  });
+  // Exact match first; the search endpoint is the fallback.
+  try {
+    const r = await fetch('https://lrclib.net/api/get?' + qs);
+    if (r.ok) return await r.json();
+  } catch {}
+  try {
+    const r = await fetch('https://lrclib.net/api/search?' +
+      new URLSearchParams({ artist_name: artist || '', track_name: track || '' }));
+    if (r.ok) {
+      const hits = await r.json();
+      if (Array.isArray(hits) && hits.length) {
+        const synced = hits.filter(h => h.syncedLyrics);
+        const pool = synced.length ? synced : hits;
+        if (duration) pool.sort((a, b) => Math.abs((a.duration || 0) - duration) - Math.abs((b.duration || 0) - duration));
+        return pool[0];
+      }
+    }
+  } catch {}
+  // If the browser could not reach LRCLIB, the daemon may be able to.
+  if (yt.token) {
+    try {
+      const r = await ytApi('/lyrics?' + new URLSearchParams({
+        artist: artist || '', track: track || '', album: album || '',
+        duration: Math.round(duration || 0),
+      }));
+      const j = await r.json();
+      if (j && (j.syncedLyrics || j.plainLyrics)) return j;
+    } catch {}
+  }
+  return null;
+}
+
+async function loadLyrics(force = false) {
+  const id = state.trackId;
+  if (!id || !cfg.lyricsAuto && !force) return;
+  state.lyrics = null;
+  state.lyricIdx = -1;
+
+  if (!force) {
+    try {
+      const cached = await dbGet('lyrics', id);
+      if (cached && state.trackId === id) {
+        setLyrics(cached.data, id);
+        if (cached.data) return;
+      }
+      if (cached) return;                        // cached miss — don't re-ask
+    } catch {}
+  }
+
+  const title = state.title || '';
+  const artist = (state.artist || '').split(' — ')[0];
+  const hit = await lyricsLookup(artist, title, '', transport.duration);
+  const data = hit && (hit.syncedLyrics || hit.plainLyrics)
+    ? { synced: parseLRC(hit.syncedLyrics || ''), plain: hit.plainLyrics || '',
+        name: hit.trackName || title, by: hit.artistName || artist }
+    : null;
+
+  try { await dbPut('lyrics', { id, data, at: Date.now() }); } catch {}
+  setLyrics(data, id);
+  if (force) toast(data ? (data.synced.length ? 'Synced lyrics found.' : 'Plain lyrics found.')
+                        : 'No lyrics found for this track.');
+}
+
+/** Ask the daemon to find cover art for a track that has none embedded. */
+async function findCover(force = false) {
+  if (!yt.token) { if (force) toast('Cover lookup needs the download service.'); return; }
+  const id = state.trackId;
+  const title = state.title || '';
+  const artist = (state.artist || '').split(' — ')[0];
+  if (!title) return;
+  try {
+    const r = await ytApi('/cover?' + new URLSearchParams({
+      artist, album: '', track: title }));
+    const blob = await r.blob();
+    if (!blob.size || state.trackId !== id) return;
+    setCover(URL.createObjectURL(blob));
+    if (cfg.palette !== 'cover') { cfg.palette = 'cover'; onChange('*'); }
+    // Keep it with the library record so it survives a reload.
+    const rec = library.tracks.find(t => t.id === id);
+    if (rec && !rec.thumb) {
+      rec.thumb = await makeThumb(blob);
+      await dbPut('tracks', rec).catch(() => {});
+      renderLibrary();
+    }
+    if (force) toast('Cover art found.');
+  } catch (e) {
+    if (force) toast('No artwork found: ' + e.message);
+  }
 }
 
 /* ========================= YouTube via the daemon ========================= */
@@ -3145,6 +3288,69 @@ function drawTape() {
   if (wear > 0.05) drawFuzz(wear * 0.32);
 }
 
+/** Karaoke-style: the current line held large and bright, neighbours dimmed. */
+function drawLyrics() {
+  state.lyricHits.length = 0;
+  if (!cfg.showLyrics || !state.lyrics) return;
+  const L = state.lyrics.synced;
+  if (!L || !L.length) return;
+
+  const t = transport.time;
+  let i = state.lyricIdx;
+  if (i >= L.length) i = L.length - 1;
+  while (i + 1 < L.length && L[i + 1].t <= t) i++;
+  while (i >= 0 && L[i].t > t) i--;
+  state.lyricIdx = i;
+
+  // Ease the scroll so lines glide rather than snap.
+  state.lyricScroll = lerp(state.lyricScroll, i, 1 - Math.exp(-state.dt / 0.12));
+
+  const base = Math.max(15, Math.min(W * 0.026, 34)) * cfg.lyricsSize;
+  const step = base * 2.0;
+  const span = 3;
+  // Keep the whole block inside the viewport: at the lower-third position the
+  // trailing lines would otherwise be drawn below the fold, where they are
+  // invisible but still clickable.
+  const margin = span * step + base;
+  // The player bar owns the bottom of the screen; lines drawn under it are
+  // both hidden and unclickable, since the click lands on the UI instead.
+  const floor = H - 100;
+  const cy = clamp(cfg.lyricsPos === 'center' ? H * 0.5 : H * 0.76,
+                   Math.min(margin, H / 2), Math.max(floor - margin, H / 2));
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowBlur = 14;
+  ctx.shadowColor = 'rgba(0,0,0,.9)';
+
+  for (let k = i - span; k <= i + span; k++) {
+    if (k < 0 || k >= L.length) continue;
+    const line = L[k];
+    if (!line.text) continue;
+    const off = k - state.lyricScroll;
+    const y = cy + off * step;
+    if (y < -step || y > H + step) continue;
+
+    const d = Math.abs(off);
+    const cur = k === i;
+    const alpha = clamp(1 - d * 0.32, 0.12, 1);
+    const size = base * (cur ? 1.22 : 1);
+    ctx.font = `${cur ? 700 : 500} ${size}px ui-sans-serif,system-ui,sans-serif`;
+    ctx.fillStyle = cur ? colorAt(0.25, alpha) : `rgba(240,242,250,${alpha * 0.72})`;
+    ctx.fillText(line.text, W / 2, y);
+
+    // Remember where it landed so a click can seek to it — but only if it is
+    // actually on screen, so nothing invisible stays clickable.
+    const w = ctx.measureText(line.text).width;
+    const y0 = y - size * 0.8, y1 = y + size * 0.8;
+    if (y0 >= 0 && y1 <= floor) {
+      state.lyricHits.push({ x0: W / 2 - w / 2 - 12, x1: W / 2 + w / 2 + 12, y0, y1, t: line.t });
+    }
+  }
+  ctx.restore();
+}
+
 function drawInfo() {
   if (!cfg.showInfo || !state.title) return;
   ctx.save();
@@ -3184,6 +3390,7 @@ function frame(now) {
   ctx.globalCompositeOperation = 'source-over';
   drawSkin();
   drawVignette();
+  drawLyrics();
   drawInfo();
 
   const dur = transport.duration;
@@ -3298,6 +3505,14 @@ const overRecord = (x, y) => {
 };
 
 canvas.addEventListener('pointerdown', e => {
+  // A lyric line under the pointer wins over the record behind it.
+  for (const h of state.lyricHits) {
+    if (e.offsetX >= h.x0 && e.offsetX <= h.x1 && e.offsetY >= h.y0 && e.offsetY <= h.y1) {
+      transport.seek(h.t);
+      state.lyricIdx = -1;
+      return;
+    }
+  }
   if (!overRecord(e.offsetX, e.offsetY)) return;
   if (!usingTurntable()) {
     toast(state.sourceKind === 'file'

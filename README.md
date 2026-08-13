@@ -111,6 +111,31 @@ case. And the service requires a bearer token and only accepts URLs on a host
 allowlist (YouTube by default) because an unguarded download endpoint on a
 public server is an open proxy that strangers will happily point at anything.
 
+## Lyrics
+
+Time-synced lyrics come from [LRCLIB](https://lrclib.net) — keyless, free, and
+CORS-enabled, so the browser asks it directly and this works with **no server
+at all**. They are fetched automatically when a track loads, cached in
+IndexedDB (misses too, so a track without lyrics isn't re-queried), and drawn
+karaoke-style with the current line held in the palette's accent color.
+
+**Click any line to jump to it.** Position (lower third or centred), text size,
+and auto-fetch are in the panel, along with a manual *Look up lyrics now*.
+
+## Cover art lookup
+
+Missing artwork can be found automatically from the iTunes Search API. Unlike
+lyrics this **needs the download service**, for a specific reason: the art CDNs
+send no `Access-Control-Allow-Origin` header, so an image loaded straight from
+them taints the canvas and `getImageData` throws — which would silently drop
+the whole palette back to defaults and stop covers driving the visuals. The
+daemon refetches the image server-side and hands it back same-origin, keeping
+the canvas clean. Found art is saved to the library record, so it survives a
+reload.
+
+The lookup takes search terms only, never a URL — accepting a URL there would
+turn the box into an open image proxy.
+
 ## Player skins
 
 A skin is an independent layer drawn over whichever spectrum mode is running —

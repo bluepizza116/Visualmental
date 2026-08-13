@@ -31,7 +31,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import parse_qs, unquote, urlparse
 
 MEDIA = Path(os.environ.get("PRISM_MEDIA", "/var/lib/prism/media"))
 TOKEN_FILE = Path(os.environ.get("PRISM_TOKEN_FILE", "/etc/prism/token"))
@@ -52,20 +52,36 @@ WORK = queue.Queue()
 # ----------------------------------------------------------------- helpers --
 
 def load_token() -> str:
-    """Read the shared secret, generating one on first run."""
-    if TOKEN_FILE.exists():
-        tok = TOKEN_FILE.read_text().strip()
-        if tok:
-            return tok
-    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tok = secrets.token_urlsafe(32)
-    TOKEN_FILE.write_text(tok + "\n")
+    """Read the shared secret, generating one only if we're able to."""
     try:
-        TOKEN_FILE.chmod(0o600)
-    except OSError:
-        pass
-    print(f"[prismd] generated new token at {TOKEN_FILE}", flush=True)
-    return tok
+        if TOKEN_FILE.exists():
+            tok = TOKEN_FILE.read_text().strip()
+            if tok:
+                return tok
+    except PermissionError:
+        raise SystemExit(
+            f"[prismd] cannot read {TOKEN_FILE}. It should be owned root:prism "
+            f"with mode 640 — try: chown root:prism {TOKEN_FILE} && chmod 640 {TOKEN_FILE}")
+
+    # Under systemd the token is pre-created by install.sh, because the service
+    # user can read /etc/prism but not write to it. This path is for running
+    # the daemon by hand.
+    try:
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tok = secrets.token_urlsafe(32)
+        TOKEN_FILE.write_text(tok + "\n")
+        try:
+            TOKEN_FILE.chmod(0o600)
+        except OSError:
+            pass
+        print(f"[prismd] generated new token at {TOKEN_FILE}", flush=True)
+        return tok
+    except PermissionError:
+        raise SystemExit(
+            f"[prismd] no token at {TOKEN_FILE} and it cannot be created by this user.\n"
+            f"         Create it as root:\n"
+            f"           install -o root -g prism -m 640 /dev/null {TOKEN_FILE}\n"
+            f"           python3 -c 'import secrets;print(secrets.token_urlsafe(32))' > {TOKEN_FILE}")
 
 
 TOKEN = load_token()
@@ -225,6 +241,96 @@ def download(job: dict):
             bytes=audio.stat().st_size)
 
 
+# ------------------------------------------------- lyrics and cover lookup --
+# These take search terms, never a caller-supplied URL. That is deliberate:
+# accepting a URL here would turn the box into an open image/redirect proxy,
+# which is exactly what the download allowlist exists to prevent.
+
+COVERS = MEDIA / "covers"
+UA = "Prism/1.0 (+https://github.com/bluepizza116/Visualmental)"
+
+
+def _get(url: str, timeout: int = 15):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def lrclib(artist: str, track: str, album: str = "", duration: int = 0) -> dict:
+    """Look up lyrics on LRCLIB: exact match first, then a search fallback."""
+    import json as _json
+    import urllib.parse
+
+    if duration:
+        q = urllib.parse.urlencode({
+            "artist_name": artist, "track_name": track,
+            "album_name": album or "", "duration": int(duration)})
+        try:
+            with _get(f"https://lrclib.net/api/get?{q}") as r:
+                return _json.load(r)
+        except Exception:                                        # noqa: BLE001
+            pass
+
+    q = urllib.parse.urlencode({"artist_name": artist, "track_name": track})
+    try:
+        with _get(f"https://lrclib.net/api/search?{q}") as r:
+            hits = _json.load(r)
+    except Exception:                                            # noqa: BLE001
+        return {}
+    if not isinstance(hits, list) or not hits:
+        return {}
+    # Prefer a synced result, and among those the closest running time.
+    synced = [h for h in hits if h.get("syncedLyrics")] or hits
+    if duration:
+        synced.sort(key=lambda h: abs((h.get("duration") or 0) - duration))
+    return synced[0]
+
+
+def itunes_art(artist: str, album: str, track: str) -> bytes | None:
+    """Find cover art and return the image bytes, so the browser gets it
+    same-origin — Apple's CDN sends no CORS headers, which would taint the
+    canvas and silently break palette extraction."""
+    import hashlib
+    import json as _json
+    import urllib.parse
+
+    key = hashlib.sha1(f"{artist}|{album}|{track}".lower().encode()).hexdigest()[:20]
+    COVERS.mkdir(parents=True, exist_ok=True)
+    cached = COVERS / f"{key}.jpg"
+    if cached.is_file() and cached.stat().st_size > 0:
+        return cached.read_bytes()
+
+    term = " ".join(x for x in (artist, album or track) if x).strip()
+    if not term:
+        return None
+    q = urllib.parse.urlencode({
+        "term": term, "media": "music",
+        "entity": "album" if album else "song", "limit": 5})
+    try:
+        with _get(f"https://itunes.apple.com/search?{q}") as r:
+            data = _json.load(r)
+    except Exception:                                            # noqa: BLE001
+        return None
+
+    for res in data.get("results", []):
+        art = res.get("artworkUrl100") or res.get("artworkUrl60")
+        if not art:
+            continue
+        big = art.replace("100x100bb", "1000x1000bb").replace("60x60bb", "1000x1000bb")
+        try:
+            with _get(big, timeout=20) as r:
+                blob = r.read(8 * 1024 * 1024)
+        except Exception:                                        # noqa: BLE001
+            continue
+        if blob:
+            try:
+                cached.write_bytes(blob)
+            except OSError:
+                pass
+            return blob
+    return None
+
+
 def worker():
     while True:
         jid = WORK.get()
@@ -300,6 +406,30 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/media/") or path.startswith("/api/art/"):
             name = unquote(path.rsplit("/", 1)[-1])
             return self._serve_file(name)
+
+        if path == "/api/lyrics":
+            qs = parse_qs(urlparse(self.path).query)
+            one = lambda k: (qs.get(k) or [""])[0].strip()
+            track, artist = one("track"), one("artist")
+            if not track:
+                return self._json(400, {"error": "track is required"})
+            try:
+                dur = int(float(one("duration") or 0))
+            except ValueError:
+                dur = 0
+            try:
+                return self._json(200, lrclib(artist, track, one("album"), dur) or {})
+            except Exception as e:                              # noqa: BLE001
+                return self._json(502, {"error": str(e)[:300]})
+
+        if path == "/api/cover":
+            qs = parse_qs(urlparse(self.path).query)
+            one = lambda k: (qs.get(k) or [""])[0].strip()
+            blob = itunes_art(one("artist"), one("album"), one("track"))
+            if not blob:
+                return self._json(404, {"error": "no artwork found"})
+            return self._send(200, blob, "image/jpeg",
+                              {"Cache-Control": "public, max-age=86400"})
 
         return self._json(404, {"error": "not found"})
 
