@@ -2,8 +2,9 @@
 
 A web audio visualizer that paints itself with the colors of the album cover.
 
-Open `index.html` in a browser. That's it — one self-contained file, no build step,
-no dependencies, no network calls.
+Open `index.html` in a browser. That's it — one self-contained file, no build
+step and no dependencies. Everything runs locally; the only feature that talks
+to a server is the optional YouTube downloader, which you host yourself.
 
 ## Audio sources
 
@@ -90,6 +91,25 @@ the library under storage pressure.
 
 Recorded tape notes are stored against the track, so they come back whenever
 that track is loaded — a dot in the library marks tracks that have one.
+
+## YouTube downloads
+
+yt-dlp is a Python program and cannot run in a browser, so this is the one
+feature that needs a server component — `server/prismd.py`, a small
+authenticated API in front of yt-dlp. See [`server/README.md`](server/README.md)
+to install it.
+
+In the app: **☰ Library → Download from YouTube**, paste the token the installer
+prints, then a video or playlist URL. Playlist entries are listed with
+checkboxes so you can queue the whole thing or pick from it. Finished tracks are
+pulled into the same IndexedDB library as local files and then deleted from the
+server, so nothing is stored twice.
+
+Two notes before you use it. Downloading from YouTube is against YouTube's Terms
+of Service — content you own or that is openly licensed is the uncontroversial
+case. And the service requires a bearer token and only accepts URLs on a host
+allowlist (YouTube by default) because an unguarded download endpoint on a
+public server is an open proxy that strangers will happily point at anything.
 
 ## Player skins
 

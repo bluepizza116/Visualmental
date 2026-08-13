@@ -1,0 +1,41 @@
+[Unit]
+Description=Prism download service (yt-dlp)
+Documentation=https://github.com/bluepizza116/Visualmental
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prism
+Group=prism
+
+Environment=PRISM_MEDIA=/var/lib/prism/media
+Environment=PRISM_TOKEN_FILE=/etc/prism/token
+Environment=PRISM_HOST=127.0.0.1
+Environment=PRISM_PORT=8770
+Environment=PRISM_WORKERS=2
+# Restrict what URLs the service will touch. "*" turns it into a general
+# downloader for anything yt-dlp supports — only do that deliberately.
+Environment=PRISM_ALLOW_HOSTS=youtube.com,youtu.be,music.youtube.com
+
+ExecStart=/opt/prism-venv/bin/python /opt/visualmental/server/prismd.py
+Restart=on-failure
+RestartSec=5
+
+# It binds to localhost only and Caddy proxies to it; nothing here needs
+# privileges or access to the rest of the filesystem.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+ReadWritePaths=/var/lib/prism /etc/prism
+
+[Install]
+WantedBy=multi-user.target

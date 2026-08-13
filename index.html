@@ -175,6 +175,17 @@ body.libopen #library{ transform:none; opacity:1; pointer-events:auto }
 #libProg.on{display:block}
 #libProg i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--a1),var(--a2)); transition:width .15s}
 #libEmpty{padding:26px 18px; text-align:center; color:var(--dim); font-size:12.5px; line-height:1.6}
+#ytBox{border-bottom:1px solid var(--line); padding:0 12px 8px; max-height:46vh; overflow-y:auto}
+#ytBox code{background:rgba(255,255,255,.08); padding:1px 4px; border-radius:4px; font-size:11px}
+.ytrow{display:flex; align-items:center; gap:8px; padding:4px 2px; font-size:12px}
+.ytrow input[type=checkbox]{accent-color:var(--a1); flex:0 0 auto}
+.ytrow .t{flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.ytrow .s{color:var(--dim); flex:0 0 auto; font-variant-numeric:tabular-nums}
+.ytjob{padding:5px 2px; font-size:11.5px}
+.ytjob .b{height:3px; background:rgba(255,255,255,.12); border-radius:3px; overflow:hidden; margin-top:3px}
+.ytjob .b i{display:block; height:100%; background:linear-gradient(90deg,var(--a1),var(--a2)); width:0; transition:width .3s}
+.ytjob.err{color:#ff8a8a}
+.ytjob.done{color:var(--a2)}
 #libFoot{padding:8px 12px; border-top:1px solid var(--line); color:var(--dim); font-size:11.5px; display:flex; gap:8px; align-items:center}
 
 @media (max-width:820px){
@@ -263,6 +274,25 @@ kbd{background:rgba(255,255,255,.1); border:1px solid var(--line); border-bottom
     <button class="btn sm" id="btnAddFolder">＋ Folder</button>
     <button class="btn sm" id="btnLibClear">Clear all</button>
   </div>
+  <details class="group" id="ytBox">
+    <summary>Download from YouTube</summary>
+    <div id="ytSetup" style="display:none">
+      <div class="row"><label>Server</label><input type="text" id="ytBase" placeholder="/api"></div>
+      <div class="row"><label>Token</label><input type="text" id="ytToken" placeholder="paste token"></div>
+      <div class="pgrid"><button class="btn sm" id="ytConnect">Connect</button></div>
+      <div class="hint" id="ytSetupHint">Needs the Prism download service running on your server. See <code>server/README</code>.</div>
+    </div>
+    <div id="ytMain" style="display:none">
+      <div class="row"><input type="text" id="ytUrl" placeholder="Video or playlist URL"></div>
+      <div class="pgrid">
+        <button class="btn sm" id="ytFetch">Fetch</button>
+        <button class="btn sm" id="ytAll" disabled>Queue all</button>
+        <button class="btn sm" id="ytForget">Sign out</button>
+      </div>
+      <div id="ytResults"></div>
+      <div id="ytJobs"></div>
+    </div>
+  </details>
   <div id="libProg"><i></i></div>
   <div id="libList"></div>
   <div id="libFoot"><span id="libStore">—</span><span class="spacer"></span><span id="libSel"></span></div>
@@ -1716,6 +1746,196 @@ function stepTrack(dir) {
   const i = list.findIndex(t => t.id === library.playingId);
   const next = list[(i < 0 ? 0 : i + dir + list.length) % list.length];
   if (next) playFromLibrary(next.id);
+}
+
+/* ========================= YouTube via the daemon ========================= */
+/* yt-dlp is a Python program, so this half only talks to the service running
+   on the server (see server/prismd.py). Finished downloads are pulled into the
+   same IndexedDB library as local files, then dropped from the server. */
+
+const yt = { base: '', token: '', items: [], jobs: [], polling: null, importing: new Set() };
+
+function ytLoadCreds() {
+  yt.base = localStorage.getItem('prism.api.base') || '/api';
+  yt.token = localStorage.getItem('prism.api.token') || '';
+}
+
+async function ytApi(path, opts = {}) {
+  const r = await fetch(yt.base + path, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(yt.token ? { Authorization: 'Bearer ' + yt.token } : {}),
+      ...(opts.headers || {}),
+    },
+  });
+  if (!r.ok) {
+    let msg = r.status === 401 ? 'token rejected' : `HTTP ${r.status}`;
+    try { const j = await r.json(); if (j.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
+  return r;
+}
+
+function ytShow(connected) {
+  $('#ytSetup').style.display = connected ? 'none' : '';
+  $('#ytMain').style.display = connected ? '' : 'none';
+}
+
+async function ytCheck(quiet = true) {
+  ytLoadCreds();
+  $('#ytBase').value = yt.base;
+  $('#ytToken').value = yt.token;
+  if (!yt.token) { ytShow(false); return false; }
+  try {
+    await ytApi('/jobs');
+    ytShow(true);
+    ytPoll();
+    return true;
+  } catch (e) {
+    ytShow(false);
+    $('#ytSetupHint').textContent = 'Could not reach the service: ' + e.message;
+    if (!quiet) toast('Download service: ' + e.message);
+    return false;
+  }
+}
+
+async function ytResolve() {
+  const url = $('#ytUrl').value.trim();
+  if (!url) return;
+  const res = $('#ytResults');
+  res.innerHTML = '<div class="hint">Looking that up…</div>';
+  try {
+    const r = await ytApi('/resolve', { method: 'POST', body: JSON.stringify({ url }) });
+    const { items } = await r.json();
+    yt.items = items || [];
+    if (!yt.items.length) { res.innerHTML = '<div class="hint">Nothing found at that URL.</div>'; return; }
+    res.innerHTML = '';
+    for (const it of yt.items) {
+      const row = document.createElement('label');
+      row.className = 'ytrow';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = true; cb.dataset.url = it.url;
+      const t = document.createElement('span');
+      t.className = 't'; t.textContent = it.title;
+      t.title = it.uploader || '';
+      const s = document.createElement('span');
+      s.className = 's'; s.textContent = it.duration ? fmt(it.duration) : '';
+      row.append(cb, t, s);
+      res.appendChild(row);
+    }
+    $('#ytAll').disabled = false;
+    $('#ytAll').textContent = `Queue ${yt.items.length}`;
+  } catch (e) {
+    res.innerHTML = '';
+    toast('Lookup failed: ' + e.message);
+  }
+}
+
+async function ytQueue() {
+  const urls = [...$('#ytResults').querySelectorAll('input:checked')].map(c => c.dataset.url);
+  if (!urls.length) { toast('Nothing selected.'); return; }
+  try {
+    await ytApi('/jobs', { method: 'POST', body: JSON.stringify({ urls }) });
+    toast(`Queued ${urls.length} download${urls.length === 1 ? '' : 's'}.`);
+    $('#ytResults').innerHTML = '';
+    $('#ytAll').disabled = true;
+    ytPoll();
+  } catch (e) {
+    toast('Queue failed: ' + e.message);
+  }
+}
+
+function ytPoll() {
+  if (yt.polling) return;
+  const tick = async () => {
+    let active = false;
+    try {
+      const r = await ytApi('/jobs');
+      const { jobs } = await r.json();
+      yt.jobs = jobs || [];
+      active = yt.jobs.some(j => j.state === 'queued' || j.state === 'running');
+      renderYtJobs();
+      for (const j of yt.jobs) {
+        if (j.state === 'done' && !yt.importing.has(j.id)) {
+          yt.importing.add(j.id);
+          active = true;
+          ytImport(j).finally(() => yt.importing.delete(j.id));
+        }
+      }
+    } catch {
+      active = false;
+    }
+    if (!active) { clearInterval(yt.polling); yt.polling = null; }
+  };
+  yt.polling = setInterval(tick, 1400);
+  tick();
+}
+
+function renderYtJobs() {
+  const box = $('#ytJobs');
+  if (!yt.jobs.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '';
+  for (const j of yt.jobs) {
+    const d = document.createElement('div');
+    d.className = 'ytjob' + (j.state === 'error' ? ' err' : j.state === 'done' ? ' done' : '');
+    const label = j.state === 'error' ? `${j.title} — ${j.error}`
+                : j.state === 'done' ? `${j.title} — saved`
+                : `${j.title} — ${j.state}`;
+    d.innerHTML = `<div class="t"></div><div class="b"><i></i></div>`;
+    d.querySelector('.t').textContent = label;
+    d.querySelector('i').style.width = (j.state === 'done' ? 100 : j.pct) + '%';
+    box.appendChild(d);
+  }
+}
+
+/** Pull a finished download into the local library, then free it server-side. */
+async function ytImport(job) {
+  try {
+    const vid = (job.file || '').replace(/\.[^.]+$/, '');
+    const id = 'yt:' + (vid || job.id);
+    if (library.tracks.some(t => t.id === id)) {
+      await ytApi('/forget', { method: 'POST', body: JSON.stringify({ id: job.id }) }).catch(() => {});
+      return;
+    }
+
+    const ar = await ytApi('/media/' + encodeURIComponent(job.file));
+    const blob = await ar.blob();
+
+    let thumb = null;
+    if (job.thumb) {
+      try {
+        const tr = await ytApi('/art/' + encodeURIComponent(job.thumb));
+        thumb = await makeThumb(await tr.blob());
+      } catch {}
+    }
+
+    const safe = (job.title || vid).replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120);
+    const rec = {
+      id,
+      name: `${safe}.${job.ext || 'm4a'}`,
+      title: job.title || vid,
+      artist: job.uploader || '',
+      album: 'YouTube',
+      duration: job.duration || 0,
+      size: blob.size,
+      mime: blob.type || '',
+      addedAt: Date.now(),
+      thumb,
+    };
+    await dbPut('audio', { id, blob });
+    await dbPut('tracks', rec);
+    library.tracks.push(rec);
+    sortLibrary();
+    renderLibrary();
+    updateStorageLine();
+
+    // The browser owns the file now; don't leave a second copy on the server.
+    await ytApi('/forget', { method: 'POST', body: JSON.stringify({ id: job.id }) }).catch(() => {});
+  } catch (e) {
+    console.warn('yt import failed', e);
+    toast('Could not save “' + (job.title || 'track') + '”: ' + e.message);
+  }
 }
 
 /* --------------------------------------------------------------- controls -- */
@@ -3264,6 +3484,21 @@ $('#btnAddFolder').onclick = () => $('#dirInput').click();
 $('#btnLibClear').onclick = clearLibrary;
 $('#libSearch').oninput = renderLibrary;
 
+$('#ytFetch').onclick = ytResolve;
+$('#ytAll').onclick = ytQueue;
+$('#ytUrl').onkeydown = e => { if (e.key === 'Enter') ytResolve(); };
+$('#ytConnect').onclick = async () => {
+  localStorage.setItem('prism.api.base', $('#ytBase').value.trim() || '/api');
+  localStorage.setItem('prism.api.token', $('#ytToken').value.trim());
+  if (await ytCheck(false)) toast('Connected to the download service.');
+};
+$('#ytForget').onclick = () => {
+  localStorage.removeItem('prism.api.token');
+  yt.token = '';
+  ytShow(false);
+  toast('Token cleared.');
+};
+
 $('#bulkInput').onchange = e => { importFiles(e.target.files); e.target.value = ''; };
 $('#dirInput').onchange = e => { importFiles(e.target.files); e.target.value = ''; };
 
@@ -3350,6 +3585,7 @@ resize();
 rebuildRamp();
 syncSourceUI();
 loadLibrary();
+ytCheck();
 $('#vol').value = audioEl.volume = 1;
 wake();
 requestAnimationFrame(frame);

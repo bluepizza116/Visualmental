@@ -8,8 +8,6 @@
 # override with the DOMAIN and WEB_ROOT environment variables.
 
 __DOMAIN__ {
-	root * __WEB_ROOT__
-	file_server
 	encode zstd gzip
 
 	header {
@@ -34,11 +32,30 @@ __DOMAIN__ {
 		-Server
 	}
 
-	# The app is a single file that changes on every deploy, so it must not be
-	# cached; any assets you add later are safe to cache hard.
-	header /index.html Cache-Control "no-cache, must-revalidate"
-	@assets path *.png *.jpg *.jpeg *.svg *.webp *.woff2 *.ico
-	header @assets Cache-Control "public, max-age=31536000, immutable"
+	# The download service (server/prismd.py), if installed. It binds to
+	# localhost and does its own bearer-token auth; this only routes to it.
+	# Nothing is proxied unless the service is actually running.
+	@api path /api/*
+	handle @api {
+		reverse_proxy 127.0.0.1:8770 {
+			# Resolving a large playlist can take a while before the first byte.
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
+	handle {
+		root * __WEB_ROOT__
+		file_server
+
+		# The app is a single file that changes on every deploy, so it must not
+		# be cached; any assets you add later are safe to cache hard.
+		header /index.html Cache-Control "no-cache, must-revalidate"
+		@assets path *.png *.jpg *.jpeg *.svg *.webp *.woff2 *.ico
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+	}
 
 	log {
 		output file /var/log/caddy/visualmental.log {
