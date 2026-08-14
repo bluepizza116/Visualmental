@@ -46,6 +46,9 @@ button,select,input[type=text]{font:inherit; color:var(--txt)}
 .btn:hover{background:rgba(255,255,255,.13); border-color:rgba(255,255,255,.22)}
 .btn:active{transform:translateY(1px)}
 .btn.on{background:color-mix(in srgb,var(--a1) 34%,transparent); border-color:color-mix(in srgb,var(--a1) 60%,transparent)}
+#btnRec2.on{background:rgba(255,60,60,.28); border-color:rgba(255,90,90,.6); color:#fff;
+  animation:recpulse 1.6s ease-in-out infinite}
+@keyframes recpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,60,60,.5)}50%{box-shadow:0 0 0 7px rgba(255,60,60,0)}}
 .btn.icon{padding:8px 10px}
 .btn.sm{padding:6px 10px; font-size:12.5px}
 .btn[disabled]{opacity:.4; cursor:not-allowed}
@@ -379,6 +382,7 @@ html[data-ui="tv"] .trk:focus-visible, html[data-ui="tv"] .pl:focus-visible{back
   <button class="btn" id="btnLib" title="Library (L)">☰ Library</button>
   <span class="badge" id="srcBadge">no source</span>
   <span class="spacer"></span>
+  <button class="btn icon" id="btnRec2" title="Record video (G)">⏺</button>
   <button class="btn icon" id="btnPanel" title="Toggle controls (C)">⚙</button>
   <button class="btn icon" id="btnHide" title="Hide all UI (H)">◑</button>
   <button class="btn icon" id="btnFull" title="Fullscreen (F)">⛶</button>
@@ -530,6 +534,7 @@ const DEFAULTS = {
   showCover: true, showInfo: true,
   showLyrics: true, lyricsAuto: true, lyricsSize: 1, lyricsPos: 'bottom', coverAuto: true,
   uiMode: 'auto',   // auto | desktop | touch | tv
+  capFps: 30, capMbps: 12,
 
   // player skin — an independent layer drawn over whichever spectrum mode is active
   skin: 'none',                 // none | vinyl | cd | tape
@@ -627,6 +632,14 @@ const SCHEMA = [
     { k: 'coverAuto',  t: 'toggle', label: 'Auto-find cover art' },
     { k: '_coverfetch', t: 'button', label: 'Find cover art now', action: () => findCover(true) },
     { k: '_coverhint', t: 'note', label: 'Artwork lookup needs the download service (it proxies the image so palette extraction keeps working).' },
+  ]},
+  { title: 'Capture', items: [
+    { k: '_capbtn', t: 'button', label: '⏺ Record video', id: 'btnCapToggle',
+      action: () => (cap.rec ? stopCapture() : startCapture()) },
+    { k: '_still',  t: 'button', label: '◻ Save this frame', action: saveStill },
+    { k: 'capFps',  t: 'select', label: 'Frame rate', options: [[24,'24 fps'],[30,'30 fps'],[60,'60 fps']] },
+    { k: 'capMbps', t: 'select', label: 'Quality', options: [[6,'6 Mbps'],[12,'12 Mbps'],[24,'24 Mbps'],[40,'40 Mbps']] },
+    { k: '_caphint', t: 'note', label: 'Records the canvas with the audio as you hear it — wear, scratching and all. MP4 where the browser supports it, otherwise WebM.' },
   ]},
   { title: 'Display', items: [
     { k: 'uiMode', t: 'select', label: 'Layout', options: [
@@ -2629,6 +2642,7 @@ function buildControls() {
       } else if (it.t === 'button') {
         const b = document.createElement('button');
         b.className = 'btn sm'; b.textContent = it.label; b.onclick = it.action;
+        if (it.id) b.id = it.id;
         row = document.createElement('div');
         row.className = 'pgrid';
         row.appendChild(b);
@@ -3795,12 +3809,56 @@ function drawTape() {
   if (wear > 0.05) drawFuzz(wear * 0.32);
 }
 
+/* Plenty of tracks only have unsynced lyrics. With no timings there is nothing
+   to highlight, so the block is scrolled linearly with playback — close enough
+   to follow, and honest about being an approximation. */
+function drawPlainLyrics() {
+  const text = state.lyrics && state.lyrics.plain;
+  if (!text) return;
+  if (state.plainCacheFor !== text) {
+    state.plainCacheFor = text;
+    state.plainLines = text.split(/\r?\n/);
+  }
+  const lines = state.plainLines;
+  if (!lines.length) return;
+
+  const base = Math.max(13, Math.min(W * 0.021, 27)) * cfg.lyricsSize;
+  const step = base * 1.65;
+  const floor = H - (state.playerH || 100) - 16;
+  const top = 86;
+  const rows = Math.max(3, Math.floor((floor - top) / step));
+  const dur = transport.duration || 0;
+  const prog = dur ? clamp(transport.time / dur, 0, 1) : 0;
+  // Scroll so the last line arrives as the track ends.
+  const first = Math.round(Math.max(0, lines.length - rows) * prog);
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowBlur = 12;
+  ctx.shadowColor = 'rgba(0,0,0,.9)';
+  ctx.font = `500 ${base}px ui-sans-serif,system-ui,sans-serif`;
+  for (let i = 0; i < rows; i++) {
+    const line = lines[first + i];
+    if (line == null) break;
+    const y = top + i * step + step / 2;
+    // Fade the top and bottom rows so the block does not end abruptly.
+    const edge = Math.min(i, rows - 1 - i);
+    ctx.fillStyle = `rgba(238,240,248,${clamp(0.30 + edge * 0.30, 0.18, 0.82)})`;
+    ctx.fillText(line, W / 2, y);
+  }
+  ctx.font = `600 ${base * 0.62}px ui-sans-serif,system-ui,sans-serif`;
+  ctx.fillStyle = colorAt(0.3, 0.75);
+  ctx.fillText('unsynced lyrics', W / 2, top - 16);
+  ctx.restore();
+}
+
 /** Karaoke-style: the current line held large and bright, neighbours dimmed. */
 function drawLyrics() {
   state.lyricHits.length = 0;
   if (!cfg.showLyrics || !state.lyrics) return;
   const L = state.lyrics.synced;
-  if (!L || !L.length) return;
+  if (!L || !L.length) return drawPlainLyrics();
 
   const t = transport.time;
   let i = state.lyricIdx;
@@ -3973,6 +4031,7 @@ $('#btnHide').onclick = () => document.body.classList.toggle('hideui');
 $('#btnFull').onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
 $('#btnReset').onclick = () => { Object.assign(cfg, DEFAULTS); onChange('*'); toast('Settings reset.'); };
 $('#btnRandom').onclick = randomize;
+$('#btnRec2').onclick = () => (cap.rec ? stopCapture() : startCapture());
 
 function randomize() {
   Object.assign(cfg, {
@@ -4345,6 +4404,7 @@ addEventListener('keydown', e => {
   else if (k === '[') stepTrack(-1);
   else if (k === 'x') $('#btnShuf').click();
   else if (k === 'y') $('#btnRep').click();
+  else if (k === 'g') { cap.rec ? stopCapture() : startCapture(); }
   else if (k === 'v') {
     const list = MODES.map(m => m[0]);
     cfg.mode = list[(list.indexOf(cfg.mode) + (e.shiftKey ? -1 + list.length : 1)) % list.length];
@@ -4364,6 +4424,132 @@ const wake = () => {
                          uiMode === 'touch' ? 1e9 : uiMode === 'tv' ? 6000 : 2800);
 };
 ['mousemove', 'mousedown', 'keydown', 'touchstart', 'wheel'].forEach(ev => addEventListener(ev, wake, { passive: true }));
+
+/* ============================== capture ================================== */
+/* Records exactly what is on the canvas, with the audio tapped from the
+   analyser — that is the one node every source passes through, so file, tab
+   and mic all record, and the vinyl/tape wear DSP is baked in because it sits
+   upstream of it. */
+
+const cap = { rec: null, chunks: null, stream: null, dest: null, startedAt: 0, timer: 0 };
+
+/* MP4 travels better and carries a duration, which MediaRecorder's WebM does
+   not — but only when the browser names a concrete codec. Chrome answers true
+   for a bare "video/mp4" and then writes a file that will not parse, so that
+   entry is deliberately absent: a broken recording is worse than a WebM whose
+   length some players report as unknown. */
+const pickMime = () => [
+  'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+  'video/mp4;codecs=avc1.4d002a,mp4a.40.2',
+  'video/webm;codecs=vp9,opus',
+  'video/webm;codecs=vp8,opus',
+  'video/webm',
+].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+
+function startCapture() {
+  if (cap.rec) return;
+  if (!window.MediaRecorder || !canvas.captureStream) {
+    toast('This browser cannot record the canvas.');
+    return;
+  }
+  const fps = +cfg.capFps || 30;
+  let stream;
+  try {
+    stream = canvas.captureStream(fps);
+  } catch (e) {
+    toast('Could not capture the canvas: ' + e.message);
+    return;
+  }
+
+  // Mix in the audio if there is any. Recording stays silent rather than
+  // failing when nothing is loaded yet.
+  if (ctxA && analyser) {
+    try {
+      cap.dest = ctxA.createMediaStreamDestination();
+      analyser.connect(cap.dest);
+      for (const t of cap.dest.stream.getAudioTracks()) stream.addTrack(t);
+    } catch (e) { console.warn('capture audio failed', e); }
+  }
+
+  const mime = pickMime();
+  try {
+    cap.rec = new MediaRecorder(stream, {
+      ...(mime ? { mimeType: mime } : {}),
+      videoBitsPerSecond: (+cfg.capMbps || 12) * 1e6,
+    });
+  } catch (e) {
+    toast('Recorder failed to start: ' + e.message);
+    stopCaptureCleanup();
+    return;
+  }
+
+  cap.chunks = [];
+  cap.stream = stream;
+  cap.rec.ondataavailable = e => e.data.size && cap.chunks.push(e.data);
+  cap.rec.onstop = finishCapture;
+  cap.rec.start(1000);
+  cap.startedAt = performance.now();
+  cap.timer = setInterval(syncCaptureUI, 500);
+  syncCaptureUI();
+  toast('Recording. Press ⏺ again to stop and save.');
+}
+
+function stopCapture() {
+  if (cap.rec && cap.rec.state !== 'inactive') cap.rec.stop();
+}
+
+function stopCaptureCleanup() {
+  clearInterval(cap.timer);
+  cap.timer = 0;
+  if (cap.dest) { try { analyser.disconnect(cap.dest); } catch {} cap.dest = null; }
+  if (cap.stream) { cap.stream.getTracks().forEach(t => t.stop()); cap.stream = null; }
+  cap.rec = null;
+  syncCaptureUI();
+}
+
+function finishCapture() {
+  const type = (cap.rec && cap.rec.mimeType) || 'video/webm';
+  const blob = new Blob(cap.chunks || [], { type });
+  const secs = (performance.now() - cap.startedAt) / 1000;
+  stopCaptureCleanup();
+  if (!blob.size) { toast('Nothing was recorded.'); return; }
+  const ext = type.includes('mp4') ? 'mp4' : 'webm';
+  saveBlob(blob, `${safeName(state.title || 'prism')}.${ext}`);
+  toast(`Saved ${secs.toFixed(0)}s · ${(blob.size / 1048576).toFixed(1)} MB`);
+}
+
+const safeName = s => (s || 'prism').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80).trim() || 'prism';
+
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 20000);
+}
+
+function saveStill() {
+  canvas.toBlob(b => {
+    if (!b) { toast('Could not grab the frame.'); return; }
+    saveBlob(b, `${safeName(state.title || 'prism')}.png`);
+    toast('Frame saved.');
+  }, 'image/png');
+}
+
+function syncCaptureUI() {
+  const btn = $('#btnRec2');
+  const on = !!cap.rec;
+  if (btn) {
+    btn.classList.toggle('on', on);
+    btn.textContent = on ? `⏹ ${fmt((performance.now() - cap.startedAt) / 1000)}` : '⏺';
+    btn.title = on ? 'Stop recording and save' : 'Record video (G)';
+  }
+  const p = $('#btnCapToggle');
+  if (p) p.textContent = on ? '⏹ Stop and save' : '⏺ Record video';
+}
 
 /* ========================= adaptive UI + remote ========================== */
 

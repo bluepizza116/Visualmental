@@ -150,6 +150,10 @@ karaoke-style with the current line held in the palette's accent color.
 **Click any line to jump to it.** Position (lower third or centred), text size,
 and auto-fetch are in the panel, along with a manual *Look up lyrics now*.
 
+Where only unsynced lyrics exist, the block is shown scrolling linearly with
+playback and labelled *unsynced* — there are no timings to follow, so it is an
+approximation rather than a pretence.
+
 ## Cover art lookup
 
 Missing artwork can be found automatically from the iTunes Search API. Unlike
@@ -213,6 +217,27 @@ speed, sheen strength and art on/off are all adjustable.
 The artwork turns with the disc, as a real CD does. **Spin the art** turns that
 off if you would rather keep the cover upright and readable — the sheen and
 rings keep rotating either way, so the disc still reads as spinning.
+
+## Capture
+
+`⏺` in the toolbar, `G`, or **Capture** in the panel records the canvas with
+the audio, and *Save this frame* writes a PNG. Frame rate and bitrate are
+adjustable.
+
+Audio is tapped from the analyser — the one node every source passes through —
+so files, tab audio and the mic all record, and the vinyl and tape wear DSP is
+baked in because it sits upstream. What you hear is what lands in the file.
+
+Format is MP4 where the browser names a concrete codec for it, otherwise WebM.
+Chrome answers "supported" for a bare `video/mp4` and then writes a file that
+will not parse, so that path is deliberately skipped. The WebM that
+MediaRecorder produces carries no duration in its header, so some players show
+an unknown length and seek poorly; it plays through correctly, and remuxing
+fixes it if you need to edit:
+
+```sh
+ffmpeg -i clip.webm -c copy clip-fixed.webm
+```
 
 ## Phone and TV
 
