@@ -80,6 +80,7 @@ would pull hundreds of MB into memory.
 
 - **Search** filters on title, artist and album, and narrows the play queue too
 - **`[` / `]`** step to the previous / next track; a finished track auto-advances
+- **`＋`** on a row queues it; shift-click queues it to play next
 - Re-importing the same files is a no-op — tracks are keyed by name, size and
   modified time
 - **✕** on a row removes that track; **Clear all** empties the library. Neither
@@ -91,6 +92,33 @@ the library under storage pressure.
 
 Recorded tape notes are stored against the track, so they come back whenever
 that track is loaded — a dot in the library marks tracks that have one.
+
+## Queue and playlists
+
+The library panel has three tabs: **Tracks**, **Playlists**, **Queue**.
+
+Playing anything from Tracks makes the visible list the queue, so a search
+narrows what plays as well as what is listed. `＋` on a row appends to the
+queue, shift-click puts it next.
+
+**Shuffle** (`X`) is a permutation, not a random pick: a shuffled pass visits
+every track exactly once, the track playing when you enable it stays put, and
+turning it off restores the original running order rather than reshuffling.
+With repeat on, each lap gets a fresh permutation.
+
+**Repeat** (`Y`) cycles off → all → one. On `one` a finished track restarts;
+on `all` the queue wraps; on `off` it stops at the end.
+
+**Playlists** are saved in IndexedDB. Name one and press *Create*, or capture
+what you are listening to with *From queue*. Deleting a playlist leaves the
+tracks alone.
+
+Queue, shuffle and repeat state all survive a reload, and Prism reopens on the
+track you left — paused, at the position you stopped — rather than starting
+something unbidden.
+
+Media keys, the lock screen and the OS now-playing card work through the Media
+Session API, with the cover art attached.
 
 ## YouTube downloads
 
@@ -219,6 +247,8 @@ settings around. `🎲` randomizes the whole look.
 | `O` | Open a file |
 | `L` | Toggle the library |
 | `[` `]` | Previous / next track |
+| `X` | Shuffle on/off |
+| `Y` | Repeat off / all / one |
 
 The UI also fades out on its own after a few seconds of no input.
 

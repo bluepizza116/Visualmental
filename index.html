@@ -179,6 +179,27 @@ body.libopen #library{ transform:none; opacity:1; pointer-events:auto }
 #libProg.on{display:block}
 #libProg i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--a1),var(--a2)); transition:width .15s}
 #libEmpty{padding:26px 18px; text-align:center; color:var(--dim); font-size:12.5px; line-height:1.6}
+.tabs{display:flex; gap:4px; padding:8px 12px 0}
+.tabs button{
+  flex:1; background:transparent; border:0; border-bottom:2px solid transparent;
+  color:var(--dim); padding:7px 4px; cursor:pointer; font:inherit; font-size:12.5px;
+  border-radius:8px 8px 0 0; transition:color .15s, border-color .15s, background .15s;
+}
+.tabs button:hover{background:rgba(255,255,255,.06); color:var(--txt)}
+.tabs button.on{color:var(--txt); border-bottom-color:var(--a1)}
+.tabs .n{color:var(--dim); font-size:11px; margin-left:4px}
+.pl{display:flex; align-items:center; gap:9px; padding:8px; border-radius:10px; cursor:pointer}
+.pl:hover{background:rgba(255,255,255,.07)}
+.pl .ic{width:34px;height:34px;flex:0 0 34px;border-radius:8px;display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--a1),var(--a2)); font-size:15px}
+.pl .txt{flex:1; min-width:0}
+.pl .n2{font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.pl .c{font-size:11.5px; color:var(--dim)}
+.trk .q{opacity:0; border:0; background:transparent; color:var(--dim); cursor:pointer;
+  font-size:14px; padding:2px 5px; border-radius:6px; flex:0 0 auto}
+.trk:hover .q{opacity:1}
+.trk .q:hover{background:rgba(255,255,255,.16); color:#fff}
+.trk.playing .n{color:var(--a2)}
 #ytBox{border-bottom:1px solid var(--line); padding:0 12px 8px; max-height:46vh; overflow-y:auto}
 #ytBox code{background:rgba(255,255,255,.08); padding:1px 4px; border-radius:4px; font-size:11px}
 .ytrow{display:flex; align-items:center; gap:8px; padding:4px 2px; font-size:12px}
@@ -272,11 +293,25 @@ kbd{background:rgba(255,255,255,.1); border:1px solid var(--line); border-bottom
     <span class="spacer"></span>
     <button class="btn sm" id="btnLibClose">✕</button>
   </div>
-  <div class="libtools">
+  <div class="tabs">
+    <button id="tabTracks" class="on">Tracks<span class="n" id="nTracks"></span></button>
+    <button id="tabLists">Playlists<span class="n" id="nLists"></span></button>
+    <button id="tabQueue">Queue<span class="n" id="nQueue"></span></button>
+  </div>
+  <div class="libtools" id="libTools">
     <input type="text" id="libSearch" placeholder="Search title, artist, album…">
     <button class="btn sm" id="btnAddFiles">＋ Files</button>
     <button class="btn sm" id="btnAddFolder">＋ Folder</button>
     <button class="btn sm" id="btnLibClear">Clear all</button>
+  </div>
+  <div class="libtools" id="listTools" style="display:none">
+    <input type="text" id="plName" placeholder="New playlist name…">
+    <button class="btn sm" id="btnPlNew">Create</button>
+    <button class="btn sm" id="btnPlFromQueue">From queue</button>
+  </div>
+  <div class="libtools" id="queueTools" style="display:none">
+    <button class="btn sm" id="btnQShuffle">🔀 Shuffle</button>
+    <button class="btn sm" id="btnQClear">Clear queue</button>
   </div>
   <details class="group" id="ytBox">
     <summary>Download from YouTube</summary>
@@ -305,7 +340,11 @@ kbd{background:rgba(255,255,255,.1); border:1px solid var(--line); border-bottom
 <div class="chrome" id="player">
   <img id="art" alt="">
   <div class="meta"><div class="t" id="mTitle">Nothing loaded</div><div class="s" id="mSub">Load a file, capture a tab, or use your mic</div></div>
+  <button class="btn icon" id="btnShuf" title="Shuffle (X)">🔀</button>
+  <button class="btn icon" id="btnPrev" title="Previous ([)">⏮</button>
   <button class="btn icon" id="btnPlay" disabled>▶</button>
+  <button class="btn icon" id="btnNext" title="Next (])">⏭</button>
+  <button class="btn icon" id="btnRep" title="Repeat (Y)">🔁</button>
   <div class="seekwrap">
     <span class="time" id="tCur">0:00</span>
     <input type="range" id="seek" min="0" max="1000" value="0" step="1" disabled>
@@ -926,6 +965,9 @@ const transport = {
 
 function syncTransportUI() {
   $('#btnPlay').textContent = transport.playing ? '❚❚' : '▶';
+  if ('mediaSession' in navigator) {
+    try { navigator.mediaSession.playbackState = transport.playing ? 'playing' : 'paused'; } catch {}
+  }
 }
 
 /** Swap engines when the skin changes, keeping the playhead where it was. */
@@ -1438,6 +1480,7 @@ async function loadAudioFile(file, rec) {
 
   if (cfg.lyricsAuto) loadLyrics();
   if (cfg.coverAuto && !state.cover) findCover();
+  updateMediaSession();
 }
 
 /* ================================ library ================================= */
@@ -1445,7 +1488,7 @@ async function loadAudioFile(file, rec) {
    record on open, but the audio blobs are hundreds of MB and are only fetched
    for the track actually being played. */
 
-const DB_NAME = 'prism', DB_VER = 2;
+const DB_NAME = 'prism', DB_VER = 3;
 let dbp = null;
 
 function db() {
@@ -1458,6 +1501,7 @@ function db() {
       if (!d.objectStoreNames.contains('audio'))  d.createObjectStore('audio',  { keyPath: 'id' });
       if (!d.objectStoreNames.contains('notes'))  d.createObjectStore('notes',  { keyPath: 'id' });
       if (!d.objectStoreNames.contains('lyrics')) d.createObjectStore('lyrics', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('playlists')) d.createObjectStore('playlists', { keyPath: 'id' });
     };
     rq.onsuccess = () => res(rq.result);
     rq.onerror = () => rej(rq.error);
@@ -1482,7 +1526,7 @@ const dbPut = (s, v) => idb(s, 'readwrite', st => st.put(v));
 const dbDel = (s, id) => idb(s, 'readwrite', st => st.delete(id));
 const dbClear = s => idb(s, 'readwrite', st => st.clear());
 
-const library = { tracks: [], view: [], playingId: null, importing: false, cancel: false };
+const library = { tracks: [], view: [], playingId: null, importing: false, cancel: false, tab: 'tracks' };
 
 const trackId = f => `${f.name}::${f.size}::${f.lastModified || 0}`;
 const AUDIO_RE = /\.(mp3|m4a|mp4|flac|ogg|oga|opus|wav|aac|webm|aiff?|wma)$/i;
@@ -1633,6 +1677,88 @@ function sortLibrary() {
 }
 
 function renderLibrary() {
+  const tab = library.tab || 'tracks';
+  $('#libTools').style.display   = tab === 'tracks' ? '' : 'none';
+  $('#listTools').style.display  = tab === 'lists'  ? '' : 'none';
+  $('#queueTools').style.display = tab === 'queue'  ? '' : 'none';
+  $('#tabTracks').classList.toggle('on', tab === 'tracks');
+  $('#tabLists').classList.toggle('on',  tab === 'lists');
+  $('#tabQueue').classList.toggle('on',  tab === 'queue');
+  $('#nTracks').textContent = library.tracks.length ? String(library.tracks.length) : '';
+  $('#nLists').textContent  = playlists.all.length ? String(playlists.all.length) : '';
+  syncQueueButtons();
+  if (tab === 'lists') return renderPlaylists();
+  if (tab === 'queue') return renderQueueList();
+  renderTracks();
+}
+
+const renderQueue = () => { if ((library.tab || 'tracks') === 'queue') renderLibrary(); else syncQueueButtons(); };
+
+function renderPlaylists() {
+  const list = $('#libList');
+  list.innerHTML = '';
+  if (!playlists.all.length) {
+    list.innerHTML = `<div id="libEmpty">No playlists yet.<br>Name one above and press <b>Create</b>,
+      or build a queue and use <b>From queue</b>.<br><br>Add tracks with the <b>+</b> on any row.</div>`;
+    return;
+  }
+  for (const pl of playlists.all) {
+    const row = document.createElement('div');
+    row.className = 'pl';
+    const ic = document.createElement('div'); ic.className = 'ic'; ic.textContent = '≡';
+    const txt = document.createElement('div'); txt.className = 'txt';
+    txt.innerHTML = '<div class="n2"></div><div class="c"></div>';
+    txt.querySelector('.n2').textContent = pl.name;
+    txt.querySelector('.c').textContent = `${pl.ids.length} track${pl.ids.length === 1 ? '' : 's'}`;
+    const x = document.createElement('button');
+    x.className = 'x'; x.textContent = '✕'; x.style.opacity = 1;
+    x.onclick = e => { e.stopPropagation(); deletePlaylist(pl.id); };
+    row.append(ic, txt, x);
+    row.onclick = () => {
+      const ids = pl.ids.filter(id => library.tracks.some(t => t.id === id));
+      if (!ids.length) { toast('That playlist has no tracks left in the library.'); return; }
+      setQueue(ids, ids[0]);
+      playQueueAt(0);
+      toast(`Playing “${pl.name}”.`);
+    };
+    list.appendChild(row);
+  }
+}
+
+function renderQueueList() {
+  const list = $('#libList');
+  list.innerHTML = '';
+  if (!queue.order.length) {
+    list.innerHTML = `<div id="libEmpty">The queue is empty.<br>
+      Play anything from <b>Tracks</b> and the visible list becomes the queue.</div>`;
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  queue.order.forEach((idx, pos) => {
+    const t = library.tracks.find(x => x.id === queue.ids[idx]);
+    if (!t) return;
+    const row = document.createElement('div');
+    row.className = 'trk' + (pos === queue.pos ? ' on playing' : '');
+    const ph = document.createElement('div'); ph.className = 'ph';
+    if (t.thumb) { const im = document.createElement('img'); im.src = URL.createObjectURL(t.thumb);
+      im.onload = () => URL.revokeObjectURL(im.src); row.appendChild(im); }
+    else row.appendChild(ph);
+    const txt = document.createElement('div'); txt.className = 'txt';
+    txt.innerHTML = '<div class="n"></div><div class="a"></div>';
+    txt.querySelector('.n').textContent = t.title;
+    txt.querySelector('.a').textContent = t.artist || t.name;
+    row.appendChild(txt);
+    const x = document.createElement('button');
+    x.className = 'x'; x.textContent = '✕';
+    x.onclick = e => { e.stopPropagation(); removeFromQueue(pos); };
+    row.appendChild(x);
+    row.onclick = () => playQueueAt(pos);
+    frag.appendChild(row);
+  });
+  list.appendChild(frag);
+}
+
+function renderTracks() {
   const q = $('#libSearch').value.trim().toLowerCase();
   library.view = q
     ? library.tracks.filter(t => (t.title + ' ' + t.artist + ' ' + t.album).toLowerCase().includes(q))
@@ -1657,7 +1783,7 @@ function renderLibrary() {
   const frag = document.createDocumentFragment();
   for (const t of library.view) {
     const row = document.createElement('div');
-    row.className = 'trk' + (t.id === library.playingId ? ' on' : '');
+    row.className = 'trk' + (t.id === library.playingId ? ' on playing' : '');
     row.title = t.name;
 
     if (t.thumb) {
@@ -1690,6 +1816,13 @@ function renderLibrary() {
     d.className = 'd';
     d.textContent = t.duration ? fmt(t.duration) : '';
     row.appendChild(d);
+
+    const add = document.createElement('button');
+    add.className = 'q';
+    add.textContent = '＋';
+    add.title = 'Add to queue (shift-click: play next)';
+    add.onclick = e => { e.stopPropagation(); enqueue(t.id, e.shiftKey); };
+    row.appendChild(add);
 
     const x = document.createElement('button');
     x.className = 'x';
@@ -1753,9 +1886,15 @@ async function loadLibrary() {
   updateStorageLine();
 }
 
-async function playFromLibrary(id) {
+async function playFromLibrary(id, fromQueue = false) {
   const rec = library.tracks.find(t => t.id === id);
   if (!rec) return;
+  // Clicking a track makes whatever is on screen the queue, so search narrows
+  // playback as well as the list.
+  if (!fromQueue) {
+    const list = library.view.length ? library.view : library.tracks;
+    setQueue(list.map(t => t.id), id);
+  }
   const row = await dbGet('audio', id);
   if (!row || !row.blob) { toast('That track’s audio is missing — re-add it.'); return; }
 
@@ -1765,13 +1904,221 @@ async function playFromLibrary(id) {
   renderLibrary();
 }
 
-/** Queue follows whatever is currently listed, so search narrows playback too. */
-function stepTrack(dir) {
-  const list = library.view.length ? library.view : library.tracks;
-  if (!list.length) return;
-  const i = list.findIndex(t => t.id === library.playingId);
-  const next = list[(i < 0 ? 0 : i + dir + list.length) % list.length];
-  if (next) playFromLibrary(next.id);
+/* ------------------------------------------------------------- the queue -- */
+/* `ids` is what is queued, in the order it was added. `order` is the play
+   order — identity when sequential, a shuffled permutation otherwise. Keeping
+   them apart means toggling shuffle never loses the original running order,
+   and a shuffled pass visits everything exactly once instead of picking at
+   random and repeating. */
+
+const queue = { ids: [], order: [], pos: -1, shuffle: false, repeat: 'off' };
+
+function shuffled(n, keepFirst = -1) {
+  const a = [...Array(n).keys()];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  // Whatever is playing stays put, so turning shuffle on doesn't skip the track.
+  if (keepFirst >= 0) {
+    const at = a.indexOf(keepFirst);
+    if (at > 0) { [a[0], a[at]] = [a[at], a[0]]; }
+  }
+  return a;
+}
+
+function rebuildOrder(keepPlaying = true) {
+  const cur = queue.pos >= 0 ? queue.order[queue.pos] : -1;
+  queue.order = queue.shuffle
+    ? shuffled(queue.ids.length, keepPlaying ? cur : -1)
+    : [...Array(queue.ids.length).keys()];
+  queue.pos = cur >= 0 ? Math.max(0, queue.order.indexOf(cur)) : (queue.ids.length ? 0 : -1);
+}
+
+function setQueue(ids, startId) {
+  queue.ids = [...ids];
+  const at = startId ? queue.ids.indexOf(startId) : 0;
+  queue.order = queue.shuffle ? shuffled(queue.ids.length, Math.max(0, at))
+                              : [...Array(queue.ids.length).keys()];
+  queue.pos = queue.ids.length ? Math.max(0, queue.order.indexOf(Math.max(0, at))) : -1;
+  saveQueue();
+  renderQueue();
+}
+
+const queueCurrentId = () => (queue.pos >= 0 && queue.pos < queue.order.length)
+  ? queue.ids[queue.order[queue.pos]] : null;
+
+async function playQueueAt(pos) {
+  if (pos < 0 || pos >= queue.order.length) return;
+  queue.pos = pos;
+  const id = queueCurrentId();
+  saveQueue();
+  if (id) await playFromLibrary(id, true);
+}
+
+/** dir is +1 or -1. `auto` marks an end-of-track advance, where repeat applies. */
+function stepTrack(dir, auto = false) {
+  if (!queue.ids.length) {
+    const list = library.view.length ? library.view : library.tracks;
+    if (!list.length) return;
+    setQueue(list.map(t => t.id), library.playingId);
+  }
+  if (auto && queue.repeat === 'one') { transport.seek(0); transport.play(); return; }
+
+  let next = queue.pos + dir;
+  if (next >= queue.order.length) {
+    if (queue.repeat === 'all') {
+      // A fresh permutation each lap, otherwise shuffle repeats the same run.
+      if (queue.shuffle) queue.order = shuffled(queue.ids.length);
+      next = 0;
+    } else if (auto) { transport.pause(); return; }
+    else next = 0;
+  }
+  if (next < 0) next = queue.order.length - 1;
+  playQueueAt(next);
+}
+
+function enqueue(id, next = false) {
+  const at = queue.ids.indexOf(id);
+  if (at >= 0) { toast('Already in the queue.'); return; }
+  queue.ids.push(id);
+  const idx = queue.ids.length - 1;
+  if (next && queue.pos >= 0) queue.order.splice(queue.pos + 1, 0, idx);
+  else queue.order.push(idx);
+  saveQueue();
+  renderQueue();
+  toast(next ? 'Playing next.' : 'Added to the queue.');
+}
+
+function removeFromQueue(pos) {
+  const idx = queue.order[pos];
+  queue.order.splice(pos, 1);
+  if (pos < queue.pos) queue.pos--;
+  else if (pos === queue.pos) queue.pos = Math.min(queue.pos, queue.order.length - 1);
+  // Indices above the removed one shift down.
+  queue.ids.splice(idx, 1);
+  queue.order = queue.order.map(v => (v > idx ? v - 1 : v));
+  saveQueue();
+  renderQueue();
+}
+
+const saveQueue = (() => {
+  let h = 0;
+  return () => {
+    clearTimeout(h);
+    h = setTimeout(() => {
+      try {
+        localStorage.setItem('prism.queue', JSON.stringify({
+          ids: queue.ids, order: queue.order, pos: queue.pos,
+          shuffle: queue.shuffle, repeat: queue.repeat,
+        }));
+      } catch {}
+    }, 200);
+  };
+})();
+
+function restoreQueue() {
+  try {
+    const q = JSON.parse(localStorage.getItem('prism.queue') || '{}');
+    if (!Array.isArray(q.ids)) return;
+    const known = new Set(library.tracks.map(t => t.id));
+    // Drop anything deleted from the library since last time.
+    const keep = q.ids.filter(id => known.has(id));
+    if (keep.length !== q.ids.length) {
+      queue.ids = keep;
+      queue.order = [...Array(keep.length).keys()];
+      queue.pos = keep.length ? 0 : -1;
+    } else {
+      queue.ids = q.ids;
+      queue.order = Array.isArray(q.order) && q.order.length === q.ids.length
+        ? q.order : [...Array(q.ids.length).keys()];
+      queue.pos = typeof q.pos === 'number' ? q.pos : -1;
+    }
+    queue.shuffle = !!q.shuffle;
+    queue.repeat = ['off', 'all', 'one'].includes(q.repeat) ? q.repeat : 'off';
+  } catch {}
+  syncQueueButtons();
+}
+
+function syncQueueButtons() {
+  const s = $('#btnShuf'), r = $('#btnRep');
+  if (s) s.classList.toggle('on', queue.shuffle);
+  if (r) {
+    r.classList.toggle('on', queue.repeat !== 'off');
+    r.textContent = queue.repeat === 'one' ? '🔂' : '🔁';
+    r.title = `Repeat: ${queue.repeat} (Y)`;
+  }
+  const n = $('#nQueue');
+  if (n) n.textContent = queue.ids.length ? String(queue.ids.length) : '';
+}
+
+/* ------------------------------------------------------------- playlists -- */
+
+const playlists = { all: [] };
+
+async function loadPlaylists() {
+  try { playlists.all = await dbGetAll('playlists'); } catch { playlists.all = []; }
+  playlists.all.sort((a, b) => a.name.localeCompare(b.name));
+  const n = $('#nLists');
+  if (n) n.textContent = playlists.all.length ? String(playlists.all.length) : '';
+}
+
+async function createPlaylist(name, ids = []) {
+  const pl = { id: 'pl_' + Date.now().toString(36), name, ids, createdAt: Date.now() };
+  await dbPut('playlists', pl);
+  playlists.all.push(pl);
+  await loadPlaylists();
+  renderLibrary();
+  toast(`Playlist “${name}” created.`);
+  return pl;
+}
+
+async function addToPlaylist(plId, trackId) {
+  const pl = playlists.all.find(p => p.id === plId);
+  if (!pl) return;
+  if (pl.ids.includes(trackId)) { toast('Already in that playlist.'); return; }
+  pl.ids.push(trackId);
+  await dbPut('playlists', pl);
+  renderLibrary();
+  toast(`Added to “${pl.name}”.`);
+}
+
+async function deletePlaylist(plId) {
+  const pl = playlists.all.find(p => p.id === plId);
+  if (!pl) return;
+  if (!confirm(`Delete the playlist “${pl.name}”? The tracks themselves stay.`)) return;
+  await dbDel('playlists', plId);
+  playlists.all = playlists.all.filter(p => p.id !== plId);
+  await loadPlaylists();
+  renderLibrary();
+}
+
+/* --------------------------------------------------------- media session -- */
+/* Gives the OS the now-playing card: media keys, lock screen, and the artwork
+   on a phone or TV. */
+
+function updateMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    const art = [];
+    if (state.coverURL) art.push({ src: state.coverURL, sizes: '512x512', type: 'image/jpeg' });
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: state.title || 'Prism',
+      artist: (state.artist || '').split(' — ')[0] || '',
+      album: (state.artist || '').split(' — ')[1] || '',
+      artwork: art,
+    });
+    navigator.mediaSession.playbackState = transport.playing ? 'playing' : 'paused';
+    const set = (k, fn) => { try { navigator.mediaSession.setActionHandler(k, fn); } catch {} };
+    set('play', () => transport.play());
+    set('pause', () => transport.pause());
+    set('previoustrack', () => stepTrack(-1));
+    set('nexttrack', () => stepTrack(1));
+    set('seekbackward', d => transport.seek(transport.time - (d.seekOffset || 10)));
+    set('seekforward', d => transport.seek(transport.time + (d.seekOffset || 10)));
+    set('seekto', d => { if (d.seekTime != null) transport.seek(d.seekTime); });
+    set('stop', () => transport.pause());
+  } catch {}
 }
 
 /* ============================ lyrics & artwork ============================ */
@@ -3434,6 +3781,12 @@ function frame(now) {
   drawLyrics();
   drawInfo();
 
+  // Remember where we are, so a reload can pick the track back up.
+  if (state.trackId && transport.duration && state.t - (state._saved || 0) > 3) {
+    state._saved = state.t;
+    try { localStorage.setItem('prism.last', JSON.stringify({ id: state.trackId, at: transport.time })); } catch {}
+  }
+
   const dur = transport.duration;
   if (state.sourceKind === 'file' && dur) {
     const s = $('#seek');
@@ -3525,8 +3878,8 @@ const playPause = () => {
   transport.playing ? transport.pause() : transport.play();
 };
 $('#btnPlay').onclick = playPause;
-audioEl.onplay = () => { if (!usingTurntable()) $('#btnPlay').textContent = '❚❚'; ctxA && ctxA.resume(); };
-audioEl.onpause = () => { if (!usingTurntable()) $('#btnPlay').textContent = '▶'; };
+audioEl.onplay = () => { if (!usingTurntable()) syncTransportUI(); ctxA && ctxA.resume(); };
+audioEl.onpause = () => { if (!usingTurntable()) syncTransportUI(); };
 audioEl.onloadedmetadata = () => { $('#tDur').textContent = fmt(audioEl.duration); $('#seek').disabled = false; };
 audioEl.onended = () => { if (!usingTurntable()) { $('#btnPlay').textContent = '▶'; onTrackEnded(); } };
 audioEl.onerror = () => toast('That file could not be decoded by this browser.');
@@ -3740,6 +4093,43 @@ $('#btnAddFolder').onclick = () => $('#dirInput').click();
 $('#btnLibClear').onclick = clearLibrary;
 $('#libSearch').oninput = renderLibrary;
 
+const setTab = t => { library.tab = t; renderLibrary(); };
+$('#tabTracks').onclick = () => setTab('tracks');
+$('#tabLists').onclick  = () => setTab('lists');
+$('#tabQueue').onclick  = () => setTab('queue');
+
+$('#btnPlNew').onclick = async () => {
+  const n = $('#plName').value.trim();
+  if (!n) { toast('Give the playlist a name.'); return; }
+  await createPlaylist(n);
+  $('#plName').value = '';
+};
+$('#btnPlFromQueue').onclick = async () => {
+  if (!queue.ids.length) { toast('The queue is empty.'); return; }
+  const n = ($('#plName').value.trim()) || `Queue ${new Date().toLocaleDateString()}`;
+  await createPlaylist(n, [...queue.ids]);
+  $('#plName').value = '';
+};
+$('#btnQClear').onclick = () => {
+  queue.ids = []; queue.order = []; queue.pos = -1;
+  saveQueue(); renderLibrary();
+};
+$('#btnQShuffle').onclick = () => { queue.shuffle = true; rebuildOrder(); saveQueue(); renderLibrary(); toast('Queue shuffled.'); };
+
+$('#btnShuf').onclick = () => {
+  queue.shuffle = !queue.shuffle;
+  rebuildOrder();
+  saveQueue(); renderLibrary();
+  toast(queue.shuffle ? 'Shuffle on.' : 'Shuffle off — original order restored.');
+};
+$('#btnRep').onclick = () => {
+  queue.repeat = queue.repeat === 'off' ? 'all' : queue.repeat === 'all' ? 'one' : 'off';
+  saveQueue(); syncQueueButtons();
+  toast(`Repeat: ${queue.repeat}`);
+};
+$('#btnPrev').onclick = () => stepTrack(-1);
+$('#btnNext').onclick = () => stepTrack(1);
+
 $('#ytFetch').onclick = ytResolve;
 $('#ytAll').onclick = ytQueue;
 $('#ytUrl').onkeydown = e => { if (e.key === 'Enter') ytResolve(); };
@@ -3760,7 +4150,7 @@ $('#dirInput').onchange = e => { importFiles(e.target.files); e.target.value = '
 
 /** When a track finishes, roll on to the next one in the current listing. */
 function onTrackEnded() {
-  if (library.playingId && (library.view.length || library.tracks.length)) stepTrack(1);
+  if (queue.ids.length || library.tracks.length) stepTrack(1, true);
 }
 
 // Drag & drop: audio goes to the library, images become the palette source.
@@ -3814,6 +4204,8 @@ addEventListener('keydown', e => {
   else if (k === 'l') toggleLibrary();
   else if (k === ']') stepTrack(1);
   else if (k === '[') stepTrack(-1);
+  else if (k === 'x') $('#btnShuf').click();
+  else if (k === 'y') $('#btnRep').click();
   else if (k === 'v') {
     const list = MODES.map(m => m[0]);
     cfg.mode = list[(list.indexOf(cfg.mode) + (e.shiftKey ? -1 + list.length : 1)) % list.length];
@@ -3840,7 +4232,38 @@ buildControls();
 resize();
 rebuildRamp();
 syncSourceUI();
-loadLibrary();
+loadLibrary().then(async () => {
+  await loadPlaylists();
+  restoreQueue();
+  renderLibrary();
+  // Reload the last track paused at its old position rather than starting it.
+  try {
+    const last = JSON.parse(localStorage.getItem('prism.last') || '{}');
+    const known = id => id && library.tracks.some(t => t.id === id);
+
+    // Point the queue at the remembered track when it is in there, so the
+    // queue and the playhead agree. Loading is always flagged as coming from
+    // the queue: otherwise playFromLibrary would re-seed from the whole
+    // library and throw away the queue that was just restored.
+    let resumeId = queueCurrentId();
+    if (known(last.id)) {
+      const at = queue.ids.indexOf(last.id);
+      if (at >= 0) { queue.pos = Math.max(0, queue.order.indexOf(at)); resumeId = last.id; }
+      else if (!known(resumeId)) resumeId = last.id;
+    }
+
+    if (known(resumeId)) {
+      const rec = library.tracks.find(t => t.id === resumeId);
+      await playFromLibrary(resumeId, true);
+      transport.pause();
+      if (resumeId === last.id && last.at > 1 && last.at < transport.duration - 1) {
+        transport.seek(last.at);
+      }
+      renderLibrary();
+      toast(`Picked up “${rec.title}” where you left off.`);
+    }
+  } catch {}
+});
 ytCheck();
 $('#vol').value = audioEl.volume = 1;
 wake();
