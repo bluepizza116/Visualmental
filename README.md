@@ -128,7 +128,10 @@ authenticated API in front of yt-dlp. See [`server/README.md`](server/README.md)
 to install it.
 
 In the app: **☰ Library → Download from YouTube**, paste the token the installer
-prints, then a video or playlist URL. Playlist entries are listed with
+prints, then a video or playlist URL. Pasting can be skipped entirely with
+`install.sh --auto-token`, but only alongside a password on the site
+(`deploy.sh --protect=user:pass`) — otherwise every visitor gets working
+credentials. See [`server/README.md`](server/README.md). Playlist entries are listed with
 checkboxes so you can queue the whole thing or pick from it. Finished tracks are
 pulled into the same IndexedDB library as local files and then deleted from the
 server, so nothing is stored twice.

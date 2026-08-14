@@ -10,6 +10,8 @@
 __DOMAIN__ {
 	encode zstd gzip
 
+__AUTH__
+
 	header {
 		# Prism is entirely self-contained — no CDNs, no fonts, no network calls —
 		# so everything can be locked to 'self'. The inline allowances are needed

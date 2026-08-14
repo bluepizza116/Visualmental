@@ -46,6 +46,28 @@ Then redeploy so Caddy routes `/api` to it:
 Finally, open the app → **☰ Library → Download from YouTube**, paste the token,
 and press **Connect**. The token is kept in that browser's `localStorage`.
 
+### Skipping the paste
+
+`install.sh --auto-token` makes the daemon serve the token at `/api/session`,
+so the app connects on its own and nothing has to be pasted on any device. It
+also recovers by itself after a rotation.
+
+**Only enable this behind something that controls who may load the page.** Any
+visitor who can open the site then holds working download credentials, which is
+precisely the open proxy the token exists to prevent. A password over the whole
+site is the easy option:
+
+```sh
+./deploy/deploy.sh --local --with-caddy --protect=me:somepassword
+```
+
+That puts Caddy basic auth in front of everything, so the browser asks once and
+remembers. An IP allowlist or a VPN in front of the site does the same job.
+
+`/api/session` is refused unless the request arrives over the loopback
+interface, so a directly-exposed daemon will not hand the token out — but that
+is a backstop, not the control. The control is whatever gates the page.
+
 ## Using it
 
 Paste a video or playlist URL and press **Fetch**. Playlist entries are listed

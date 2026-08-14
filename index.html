@@ -2450,17 +2450,54 @@ function ytShow(connected) {
   $('#ytMain').style.display = connected ? '' : 'none';
 }
 
+/* Ask the server to hand over the token. It only answers when the operator
+   has enabled it, which they should only do behind site auth — see
+   server/README. Failing here is normal and falls back to pasting one. */
+async function ytAutoToken() {
+  // Opened straight from disk there is no server to ask, and attempting it
+  // just logs a failed file:// fetch.
+  if (!/^https?:$/.test(location.protocol)) return false;
+  try {
+    const r = await fetch((localStorage.getItem('prism.api.base') || '/api') + '/session');
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (!j || !j.token) return false;
+    localStorage.setItem('prism.api.token', j.token);
+    yt.token = j.token;
+    return true;
+  } catch { return false; }
+}
+
 async function ytCheck(quiet = true) {
   ytLoadCreds();
   $('#ytBase').value = yt.base;
   $('#ytToken').value = yt.token;
-  if (!yt.token) { ytShow(false); return false; }
+  if (!yt.token) {
+    // No stored token: see whether the server will just give us one.
+    if (await ytAutoToken()) {
+      $('#ytToken').value = yt.token;
+    } else {
+      ytShow(false);
+      return false;
+    }
+  }
   try {
     await ytApi('/jobs');
     ytShow(true);
     ytPoll();
     return true;
   } catch (e) {
+    // A stored token that is refused is usually one that has been rotated;
+    // if the server hands them out, pick up the new one silently.
+    if (/token/i.test(e.message) && await ytAutoToken()) {
+      try {
+        await ytApi('/jobs');
+        $('#ytToken').value = yt.token;
+        ytShow(true);
+        ytPoll();
+        return true;
+      } catch {}
+    }
     ytShow(false);
     $('#ytSetupHint').textContent = 'Could not reach the service: ' + e.message;
     if (!quiet) toast('Download service: ' + e.message);

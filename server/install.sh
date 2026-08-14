@@ -5,6 +5,9 @@
 #
 #   ./server/install.sh
 #
+# Add --auto-token to have the browser fetch its own token, so nothing has to
+# be pasted. Only do that with the site behind a password or an IP allowlist.
+#
 # Afterwards, deploy the site with --with-caddy so Caddy picks up the /api
 # route, then paste the token this prints into the app's Library → Download
 # from YouTube panel.
@@ -29,6 +32,9 @@ newtoken() {
   chown root:prism "$CONF/token" 2>/dev/null || true
   chmod 640 "$CONF/token"
 }
+
+AUTO_TOKEN=0
+for a in "$@"; do [ "$a" = "--auto-token" ] && AUTO_TOKEN=1; done
 
 if [ "${1:-}" = "--rotate-token" ]; then
   id -u prism >/dev/null 2>&1 || { echo "service is not installed yet — run without arguments first" >&2; exit 1; }
@@ -74,6 +80,11 @@ chmod 640 "$CONF/token"
 
 say "installing systemd unit"
 sed "s|/opt/visualmental|$REPO|g" "$REPO/server/prism-downloader.service" > "$UNIT"
+if [ "$AUTO_TOKEN" -eq 1 ]; then
+  sed -i 's|^Environment=PRISM_ALLOW_HOSTS|Environment=PRISM_AUTO_TOKEN=1\nEnvironment=PRISM_ALLOW_HOSTS|' "$UNIT"
+  printf '\033[33m!! \033[0m%s\n' "auto-token enabled: anyone who can LOAD THE PAGE gets the token."
+  printf '   %s\n' "Protect the site first:  ./deploy/deploy.sh --local --with-caddy --protect=user:password"
+fi
 systemctl daemon-reload
 systemctl enable --now prism-downloader
 

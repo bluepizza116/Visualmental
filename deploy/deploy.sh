@@ -11,6 +11,10 @@
 #
 #   ./deploy/deploy.sh --dry-run       # show what would happen, change nothing
 #
+# Put the whole site behind a password (needed before enabling auto-token, or
+# anyone who loads the page holds working download credentials):
+#   ./deploy/deploy.sh --local --with-caddy --protect=me:mypassword
+#
 # Override anything via the environment:
 #   SSH_HOST=deploy@1.2.3.4 DOMAIN=example.com ./deploy/deploy.sh
 #
@@ -28,11 +32,15 @@ SSH_OPTS="${SSH_OPTS:-}"
 WITH_CADDY=0
 DRY_RUN=0
 LOCAL=0
+PROTECT=""          # user:password — puts the whole site behind basic auth
+NEED_PROTECT=0
 for arg in "$@"; do
   case "$arg" in
     --with-caddy) WITH_CADDY=1 ;;
     --dry-run)    DRY_RUN=1 ;;
     --local)      LOCAL=1 ;;
+    --protect)    NEED_PROTECT=1 ;;
+    --protect=*)  PROTECT="${arg#*=}" ;;
     -h|--help)    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -101,10 +109,36 @@ if [ "$WITH_CADDY" -eq 1 ]; then
     || { echo "error: caddy is not installed on the target." >&2
          echo "       Install it first: https://caddyserver.com/docs/install" >&2; exit 1; }
 
+  if [ "$NEED_PROTECT" -eq 1 ] && [ -z "$PROTECT" ]; then
+    echo "error: use --protect=user:password (not a bare --protect)" >&2; exit 2
+  fi
+
+  # Basic auth block, rendered only when a credential was given.
+  AUTH_BLOCK=""
+  if [ -n "$PROTECT" ]; then
+    PU="${PROTECT%%:*}"; PP="${PROTECT#*:}"
+    if [ -z "$PU" ] || [ -z "$PP" ] || [ "$PU" = "$PROTECT" ]; then
+      echo "error: --protect wants user:password" >&2; exit 2
+    fi
+    say "hashing the site password"
+    HASH="$( (command -v caddy >/dev/null 2>&1 && caddy hash-password --plaintext "$PP") \
+             || { echo "error: caddy not found, cannot hash the password" >&2; exit 1; } )"
+    # Caddy renamed basicauth -> basic_auth; validate below picks the one that works.
+    AUTH_BLOCK=$'\tbasic_auth {\n\t\t'"$PU"' '"$HASH"$'\n\t}\n'
+  fi
+
   say "rendering Caddyfile for $DOMAIN"
   TMP="$(mktemp)"
   trap 'rm -f "$TMP"' EXIT
   sed -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__WEB_ROOT__|$WEB_ROOT|g" "$REPO/deploy/Caddyfile" > "$TMP"
+  # Substitute the auth block (or remove the placeholder line entirely).
+  if [ -n "$AUTH_BLOCK" ]; then
+    printf '%s' "$AUTH_BLOCK" > "$TMP.auth"
+    sed -i -e "/__AUTH__/r $TMP.auth" -e "/__AUTH__/d" "$TMP"
+    rm -f "$TMP.auth"
+  else
+    sed -i "/__AUTH__/d" "$TMP"
+  fi
 
   remote "mkdir -p '$SITES_DIR' /var/log/caddy"
   say "installing $SITES_DIR/visualmental.caddyfile"
@@ -131,8 +165,18 @@ if [ "$WITH_CADDY" -eq 1 ]; then
 
   # Validate before reloading — a bad config should never take the site down.
   say "validating config"
-  remote "caddy validate --adapter caddyfile --config '$MAIN_CADDYFILE'" \
-    || { echo "error: caddy validate failed — NOT reloading. Restore from the .bak file if needed." >&2; exit 1; }
+  if ! remote "caddy validate --adapter caddyfile --config '$MAIN_CADDYFILE'"; then
+    if [ -n "$PROTECT" ]; then
+      # Older Caddy spells it basicauth; retry once before giving up.
+      say "retrying with the older basicauth directive"
+      remote "sed -i 's/basic_auth {/basicauth {/' '$SITES_DIR/visualmental.caddyfile'"
+      remote "caddy validate --adapter caddyfile --config '$MAIN_CADDYFILE'" \
+        || { echo "error: caddy validate failed — NOT reloading. Restore from the .bak file if needed." >&2; exit 1; }
+    else
+      echo "error: caddy validate failed — NOT reloading. Restore from the .bak file if needed." >&2
+      exit 1
+    fi
+  fi
 
   say "reloading caddy"
   remote "systemctl reload caddy || systemctl restart caddy"

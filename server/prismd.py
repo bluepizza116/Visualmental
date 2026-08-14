@@ -19,6 +19,9 @@ Environment:
   PRISM_MAX_ITEMS    cap on one playlist request  (default 200)
   PRISM_MAX_QUEUE    cap on pending jobs          (default 500)
   PRISM_ALLOW_HOSTS  comma-separated host suffixes, or "*" to allow anything
+  PRISM_AUTO_TOKEN   1 to serve the token to the browser via /api/session.
+                     Only safe behind site auth: anyone who can load the page
+                     then holds working credentials.
 """
 
 import json
@@ -40,6 +43,9 @@ PORT = int(os.environ.get("PRISM_PORT", "8770"))
 WORKERS = int(os.environ.get("PRISM_WORKERS", "2"))
 MAX_ITEMS = int(os.environ.get("PRISM_MAX_ITEMS", "200"))
 MAX_QUEUE = int(os.environ.get("PRISM_MAX_QUEUE", "500"))
+# Hands the token to the browser automatically. Only turn this on when
+# something in front of the daemon controls who may load the page.
+AUTO_TOKEN = os.environ.get("PRISM_AUTO_TOKEN", "") in ("1", "true", "yes", "on")
 ALLOW_HOSTS = [h.strip().lower() for h in os.environ.get(
     "PRISM_ALLOW_HOSTS",
     "youtube.com,youtu.be,music.youtube.com").split(",") if h.strip()]
@@ -394,7 +400,22 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/health":
             return self._json(200, {"ok": True, "service": "prismd",
-                                    "allow": ALLOW_HOSTS, "workers": WORKERS})
+                                    "allow": ALLOW_HOSTS, "workers": WORKERS,
+                                    "autoToken": AUTO_TOKEN})
+
+        if path == "/api/session":
+            # Hands the browser its token so nobody has to paste one. This is
+            # only safe when something in front of this — Caddy basic auth, an
+            # IP allowlist, a VPN — decides who may load the page at all,
+            # because anyone who can reach it gets working credentials.
+            if not AUTO_TOKEN:
+                return self._json(404, {"error": "auto-token is disabled"})
+            peer = self.client_address[0] if self.client_address else ""
+            if peer not in ("127.0.0.1", "::1"):
+                # Reaching this from anywhere but the proxy means the daemon is
+                # exposed directly, so the gate in front of it is not in play.
+                return self._json(403, {"error": "must be reached through the local proxy"})
+            return self._json(200, {"token": TOKEN})
         if not self._authed():
             return self._json(401, {"error": "bad or missing token"})
 
@@ -562,6 +583,10 @@ def main():
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"[prismd] listening on http://{HOST}:{PORT}", flush=True)
     print(f"[prismd] media {MEDIA}  allow {ALLOW_HOSTS}", flush=True)
+    if AUTO_TOKEN:
+        print("[prismd] AUTO-TOKEN IS ON: anyone who can load the page gets the "
+              "token. Keep the site behind basic auth, an IP allowlist or a VPN.",
+              flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
