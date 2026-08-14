@@ -218,6 +218,28 @@ The artwork turns with the disc, as a real CD does. **Spin the art** turns that
 off if you would rather keep the cover upright and readable — the sheen and
 rings keep rotating either way, so the disc still reads as spinning.
 
+## Beat sync
+
+Prism estimates the actual tempo rather than just reacting to loud moments.
+Spectral flux over an unsmoothed spectrum gives an onset envelope,
+autocorrelation over that envelope finds the period, and a phase search locks
+the grid — so beats are **predicted**, and pulses land *on* the beat instead of
+just after it. The detected BPM is shown top-right with a dot that blinks on
+the predicted beat, so a bad lock is obvious at a glance.
+
+*Amount* sets how hard it drives the visuals; it feeds the same pulse the bass
+already drives, so bars, radial, blob and rings all breathe with the tempo and
+particles and rings fire on the grid.
+
+**Half and double time are genuinely ambiguous** — a track at 174 with a
+two-beat pattern really does contain an 87 BPM periodicity, and no estimator
+gets that right every time. A perceptual preference curve centred near 120
+resolves the common cases; **÷2** and **×2** fix the rest, and hold until the
+track changes. **Auto** hands it back.
+
+Tempo state is cleared when the track changes, since the ten-second envelope
+would otherwise still be full of the previous song.
+
 ## Capture
 
 `⏺` in the toolbar, `G`, or **Capture** in the panel records the canvas with
@@ -280,6 +302,10 @@ Everything in the panel is live and persists to `localStorage`:
 Seven built-in presets (Neon bars, Vinyl, Oscilloscope, Lava lamp, Starfield,
 Sonar, Minimal), plus save/load/delete of your own and *Copy JSON* to move
 settings around. `🎲` randomizes the whole look.
+
+Built-ins can be deleted too. They live in the source so they cannot literally
+be erased — the removal is remembered instead, and **Restore built-ins** brings
+them all back.
 
 ## Keyboard
 

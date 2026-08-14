@@ -535,6 +535,7 @@ const DEFAULTS = {
   showLyrics: true, lyricsAuto: true, lyricsSize: 1, lyricsPos: 'bottom', coverAuto: true,
   uiMode: 'auto',   // auto | desktop | touch | tv
   capFps: 30, capMbps: 12,
+  tempoSync: true, tempoAmount: 0.55, showBpm: true,
 
   // player skin — an independent layer drawn over whichever spectrum mode is active
   skin: 'none',                 // none | vinyl | cd | tape
@@ -633,6 +634,15 @@ const SCHEMA = [
     { k: '_coverfetch', t: 'button', label: 'Find cover art now', action: () => findCover(true) },
     { k: '_coverhint', t: 'note', label: 'Artwork lookup needs the download service (it proxies the image so palette extraction keeps working).' },
   ]},
+  { title: 'Tempo', items: [
+    { k: 'tempoSync',   t: 'toggle', label: 'Beat sync' },
+    { k: 'tempoAmount', t: 'range',  label: 'Amount', min: 0, max: 1.5, step: .01, show: c => c.tempoSync },
+    { k: 'showBpm',     t: 'toggle', label: 'Show BPM', show: c => c.tempoSync },
+    { k: '_bpmhalf', t: 'button', label: '÷2', action: () => nudgeTempo(0.5), show: c => c.tempoSync },
+    { k: '_bpmdbl',  t: 'button', label: '×2', action: () => nudgeTempo(2), show: c => c.tempoSync },
+    { k: '_bpmauto', t: 'button', label: 'Auto', action: autoTempo, show: c => c.tempoSync },
+    { k: '_bpmhint', t: 'note', label: 'Estimates the tempo from onset timing and predicts the beat, so pulses land on it rather than just after it. Needs a few seconds of music to lock. Half and double time are genuinely ambiguous in music — use ÷2 / ×2 if it picks the wrong one.' },
+  ]},
   { title: 'Capture', items: [
     { k: '_capbtn', t: 'button', label: '⏺ Record video', id: 'btnCapToggle',
       action: () => (cap.rec ? stopCapture() : startCapture()) },
@@ -687,6 +697,8 @@ const state = {
   dust: null,
   recording: false, annotation: null, annotationURL: null,
   lyrics: null, lyricIdx: -1, lyricScroll: 0, lyricHits: [],
+  bpm: 0, bpmConf: 0, beatAnchor: 0, beatOffset: 0, tempoPulse: 0, lastGridBeat: -1,
+  bpmPending: 0, bpmAgree: 0, bpmManual: false,
   parts: [],
   shocks: [],
 };
@@ -696,6 +708,7 @@ const state = {
 const audioEl = $('#audio');
 let ctxA = null, analyser = null, monitor = null;
 let stereoBus = null, splitter = null, analyserL = null, analyserR = null;
+let tempoAn = null, tempoData = null;
 let elSource = null, streamSource = null, activeStream = null;
 let freqData = null, timeData = null;
 let freqL = null, freqR = null, timeL = null, timeR = null;
@@ -723,6 +736,17 @@ function ensureAudio() {
   stereoBus.connect(splitter);
   splitter.connect(analyserL, 0);
   splitter.connect(analyserR, 1);
+
+  // Onset detection needs the raw spectrum: the main analyser's smoothing is
+  // there to steady the visuals, and it smears exactly the transients tempo
+  // tracking depends on.
+  tempoAn = ctxA.createAnalyser();
+  tempoAn.fftSize = 1024;
+  tempoAn.smoothingTimeConstant = 0;
+  tempoAn.minDecibels = -95;
+  tempoAn.maxDecibels = -10;
+  tempoData = new Uint8Array(tempoAn.frequencyBinCount);
+  stereoBus.connect(tempoAn);
 
   applyAnalyser();
   return ctxA;
@@ -807,6 +831,7 @@ async function useStreamSource(kind) {
     if (state.sourceKind === kind) { state.sourceKind = null; syncSourceUI(); toast('Capture ended.'); }
   });
 
+  resetTempo();
   ctxA.resume();
   setTrackInfo(kind === 'tab' ? 'Tab / system audio' : 'Microphone',
                kind === 'tab' ? 'Live capture' : 'Live input');
@@ -1571,6 +1596,7 @@ async function loadAudioFile(file, rec) {
   state.file = file;
   state.trackId = rec ? rec.id : trackId(file);
   ttBuffer = null;
+  resetTempo();
   if (state.annotationURL) URL.revokeObjectURL(state.annotationURL);
   state.annotation = state.annotationURL = null;
   state.lyrics = null; state.lyricIdx = -1; state.lyricScroll = 0; state.lyricHits.length = 0;
@@ -2675,8 +2701,12 @@ function buildPresets() {
   const fill = () => {
     sel.innerHTML = '';
     const user = loadUserPresets();
-    sel.add(new Option('— built in —', ''));
-    for (const n of Object.keys(BUILTIN)) sel.add(new Option(n, 'b:' + n));
+    const hidden = loadHiddenBuiltins();
+    const shown = Object.keys(BUILTIN).filter(n => !hidden.has(n));
+    if (shown.length) {
+      sel.add(new Option('— built in —', ''));
+      for (const n of shown) sel.add(new Option(n, 'b:' + n));
+    }
     if (Object.keys(user).length) {
       sel.add(new Option('— yours —', ''));
       for (const n of Object.keys(user)) sel.add(new Option(n, 'u:' + n));
@@ -2714,12 +2744,33 @@ function buildPresets() {
   const del = document.createElement('button');
   del.className = 'btn sm'; del.textContent = 'Delete';
   del.onclick = () => {
-    if (!sel.value.startsWith('u:')) return toast('Only your own presets can be deleted.');
-    const n = sel.value.slice(2);
-    const u = loadUserPresets();
-    delete u[n];
-    localStorage.setItem('prism.presets', JSON.stringify(u));
-    fill(); toast('Deleted “' + n + '”');
+    const v = sel.value;
+    if (!v) return toast('Pick a preset to delete.');
+    const n = v.slice(2);
+    if (v.startsWith('u:')) {
+      const u = loadUserPresets();
+      delete u[n];
+      localStorage.setItem('prism.presets', JSON.stringify(u));
+      toast('Deleted “' + n + '”');
+    } else {
+      const hidden = loadHiddenBuiltins();
+      hidden.add(n);
+      saveHiddenBuiltins(hidden);
+      toast('Removed “' + n + '” — Restore brings the built-ins back.');
+    }
+    fill();
+  };
+
+  const restore = document.createElement('button');
+  restore.className = 'btn sm';
+  restore.id = 'btnRestoreBuiltins';
+  restore.textContent = 'Restore built-ins';
+  restore.onclick = () => {
+    const n = loadHiddenBuiltins().size;
+    if (!n) return toast('No built-ins are hidden.');
+    saveHiddenBuiltins(new Set());
+    fill();
+    toast(`Restored ${n} built-in preset${n === 1 ? '' : 's'}.`);
   };
 
   const copy = document.createElement('button');
@@ -2730,15 +2781,25 @@ function buildPresets() {
       .catch(() => toast('Clipboard blocked by the browser.'));
   };
 
-  bar.append(save, del, copy);
+  bar.append(save, del, copy, restore);
   wrap.appendChild(bar);
 
   const hint = document.createElement('div');
   hint.className = 'hint';
-  hint.textContent = 'Presets and your current settings are stored locally in this browser.';
+  hint.textContent = 'Stored locally in this browser. Built-ins can be removed too — Restore brings them back.';
   wrap.appendChild(hint);
   return wrap;
 }
+
+/* A built-in lives in the source and cannot literally be deleted, so a hidden
+   list is kept alongside the user's own presets. Same gesture, same result,
+   and it can be undone. */
+const loadHiddenBuiltins = () => {
+  try { return new Set(JSON.parse(localStorage.getItem('prism.hidden') || '[]')); }
+  catch { return new Set(); }
+};
+const saveHiddenBuiltins = set =>
+  localStorage.setItem('prism.hidden', JSON.stringify([...set]));
 
 const loadUserPresets = () => {
   try { return JSON.parse(localStorage.getItem('prism.presets') || '{}'); } catch { return {}; }
@@ -2846,6 +2907,26 @@ function analyse(dt) {
   state.treble = bandEnergy(2000, 12000) * cfg.sensitivity;
   state.level  = (state.bass * 1.4 + state.mid + state.treble * 0.7) / 3;
 
+  // Tempo runs off the same spectrum; the estimate itself is throttled.
+  pushFlux(dt);
+  tempoClock += dt;
+  if (cfg.tempoSync && tempoClock > 0.5) { tempoClock = 0; estimateTempo(); }
+
+  const tp = cfg.tempoSync ? tempoPhase() : null;
+  if (tp) {
+    // A fresh grid beat re-arms the pulse; it decays across the beat.
+    const beatIndex = Math.floor((state.t - state.beatAnchor) / tp.period);
+    if (beatIndex !== state.lastGridBeat) {
+      state.lastGridBeat = beatIndex;
+      state.tempoPulse = 1;
+      if (cfg.mode === 'particles') spawnBurst();
+      if (cfg.mode === 'rings') state.shocks.push({ r: 0, a: 1, c: Math.random() });
+    }
+    state.tempoPulse = Math.max(0, state.tempoPulse - dt / Math.max(0.08, tp.period * 0.7));
+  } else {
+    state.tempoPulse = Math.max(0, state.tempoPulse - dt * 3);
+  }
+
   if (stereoOn()) {
     analyserL.getByteFrequencyData(freqL);
     analyserR.getByteFrequencyData(freqR);
@@ -2874,7 +2955,188 @@ function analyse(dt) {
   }
 }
 
+/* ============================ tempo tracking ============================= */
+/* Energy-threshold beats fire on whatever is loud, which drifts and misses
+   quiet beats. This estimates the actual tempo instead: spectral flux gives an
+   onset envelope, autocorrelation over that envelope finds the period, and a
+   phase search locks the grid so beats can be *predicted* rather than reacted
+   to — which is what makes visuals land on the beat instead of just after it. */
+
+const FLUX_HZ = 100;                 // envelope sample rate
+const FLUX_N = 1024;                 // ~10s of history
+const flux = new Float32Array(FLUX_N);
+let fluxHead = 0, fluxAcc = 0, fluxAccN = 0, fluxClock = 0, lastSpec = null;
+let tempoClock = 0;
+
+function pushFlux(dt) {
+  if (!tempoAn || !tempoData) return;
+  tempoAn.getByteFrequencyData(tempoData);
+  if (!lastSpec || lastSpec.length !== tempoData.length) {
+    lastSpec = new Float32Array(tempoData.length);
+  }
+  // Positive spectral flux: only energy *increases* mark onsets.
+  let sum = 0;
+  const lim = tempoData.length;
+  for (let i = 1; i < lim; i++) {
+    const v = tempoData[i] / 255;
+    const d = v - lastSpec[i];
+    if (d > 0) sum += d;
+    lastSpec[i] = v;
+  }
+
+  fluxAcc += sum; fluxAccN++;
+  fluxClock += dt;
+  const step = 1 / FLUX_HZ;
+  while (fluxClock >= step) {
+    fluxClock -= step;
+    flux[fluxHead] = fluxAccN ? fluxAcc / fluxAccN : 0;
+    fluxHead = (fluxHead + 1) % FLUX_N;
+    fluxAcc = 0; fluxAccN = 0;
+  }
+}
+
+const fluxAt = i => flux[(fluxHead + i) % FLUX_N];   // 0 = oldest
+
+/* The envelope holds ten seconds of history, so a new track starts out being
+   analysed against the previous one's onsets — which is enough to lock the
+   wrong tempo well after the change. */
+function resetTempo() {
+  flux.fill(0);
+  fluxHead = 0; fluxAcc = 0; fluxAccN = 0; fluxClock = 0; tempoClock = 0;
+  lastSpec = null;
+  state.bpm = 0; state.bpmConf = 0; state.bpmPending = 0; state.bpmAgree = 0;
+  state.bpmManual = false;
+  state.tempoPulse = 0; state.lastGridBeat = -1;
+}
+
+/* Half and double time are both real periodicities in a lot of music, so no
+   estimator gets this right every time. A manual nudge is what DJ software
+   offers, and it holds until the track changes. */
+function nudgeTempo(mult) {
+  if (!state.bpm) { toast('No tempo locked yet.'); return; }
+  const next = state.bpm * mult;
+  if (next < 40 || next > 250) { toast('Out of range.'); return; }
+  state.bpm = next;
+  state.bpmManual = true;
+  state.lastGridBeat = -1;
+  toast(`Tempo set to ${Math.round(next)} BPM (manual).`);
+}
+
+function autoTempo() {
+  state.bpmManual = false;
+  state.bpmPending = 0; state.bpmAgree = 0;
+  toast('Tempo back to automatic.');
+}
+
+function estimateTempo() {
+  if (state.bpmManual) return;
+  // Mean-remove so silence and steady tone don't correlate with everything.
+  let mean = 0;
+  for (let i = 0; i < FLUX_N; i++) mean += flux[i];
+  mean /= FLUX_N;
+  let energy = 0;
+  for (let i = 0; i < FLUX_N; i++) { const d = flux[i] - mean; energy += d * d; }
+  if (energy < 1e-4) { state.bpmConf = 0; return; }
+
+  const minLag = Math.round(FLUX_HZ * 60 / 200);   // 200 BPM
+  const maxLag = Math.round(FLUX_HZ * 60 / 60);    // 60 BPM
+  // Correlate well past maxLag so each candidate's own harmonics can be read.
+  const corrMax = Math.min(FLUX_N >> 1, maxLag * 4);
+  const corr = new Float32Array(corrMax + 1);
+  let peak = 0;
+  for (let lag = minLag; lag <= corrMax; lag++) {
+    let s = 0;
+    for (let i = lag; i < FLUX_N; i++) s += (fluxAt(i) - mean) * (fluxAt(i - lag) - mean);
+    corr[lag] = s / (FLUX_N - lag);
+    if (corr[lag] > peak) peak = corr[lag];
+  }
+  if (peak <= 0) { state.bpmConf = 0; return; }
+
+  /* Autocorrelation peaks at the beat period *and* every multiple of it, so
+     picking the tallest peak often lands an octave or a third down. Scoring
+     each candidate by the support at its own multiples breaks the tie toward
+     the shortest period that explains the whole envelope — the real tempo. */
+  /* Harmonic support alone still cannot separate a tempo from half of it when
+     the music has a two-beat pattern — both are real periodicities. Beat
+     trackers resolve this with a perceptual preference curve, since listeners
+     hear tempo around 120 rather than 60 or 240. A log-normal weight, wide
+     enough (0.9 octaves) that a clearly stronger candidate still wins. */
+  const prefer = bpm => Math.exp(-0.5 * Math.pow(Math.log2(bpm / 122) / 0.9, 2));
+
+  let pick = 0, pickScore = -Infinity;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let s = corr[lag], w = 1;
+    for (let k = 2; k <= 4; k++) {
+      const l = lag * k;
+      if (l > corrMax) break;
+      s += corr[l] / k;
+      w += 1 / k;
+    }
+    const score = (s / w) * prefer(60 * FLUX_HZ / lag);
+    if (score > pickScore) { pickScore = score; pick = lag; }
+  }
+  if (!pick) { state.bpmConf = 0; return; }
+
+  /* Lags are whole samples, which at 100Hz quantises to about 1.5% up at
+     170+ BPM. Fitting a parabola through the peak and its neighbours recovers
+     the fractional lag. */
+  let refined = pick;
+  if (pick > minLag && pick < corrMax) {
+    const a = corr[pick - 1], b = corr[pick], c = corr[pick + 1];
+    const denom = a - 2 * b + c;
+    if (denom !== 0) {
+      const delta = 0.5 * (a - c) / denom;
+      if (Math.abs(delta) <= 1) refined = pick + delta;
+    }
+  }
+
+  const bpm = 60 * FLUX_HZ / refined;
+  const conf = clamp(pickScore / (energy / FLUX_N), 0, 1);
+  state.bpmConf = conf;
+  if (conf < 0.12) return;
+
+  /* Never average across an octave flip: lerping between 70 and 140 yields
+     105, a tempo present in neither reading. Close estimates are eased,
+     distant ones must repeat before they are accepted. */
+  if (!state.bpm) {
+    state.bpm = bpm;
+  } else if (Math.abs(bpm - state.bpm) / state.bpm < 0.06) {
+    state.bpm = lerp(state.bpm, bpm, 0.3);
+    state.bpmPending = 0;
+  } else {
+    state.bpmPending = (state.bpmPending && Math.abs(bpm - state.bpmPending) / bpm < 0.06)
+      ? state.bpmPending : bpm;
+    state.bpmAgree = (state.bpmAgree || 0) + 1;
+    if (state.bpmAgree >= 2) { state.bpm = bpm; state.bpmAgree = 0; state.bpmPending = 0; }
+  }
+
+  // Phase: try every offset within one period, keep the one where the grid
+  // sits on the most onset energy.
+  const P = 60 * FLUX_HZ / state.bpm;
+  let bestPhase = 0, bestSum = -Infinity;
+  for (let off = 0; off < P; off += 1) {
+    let s = 0;
+    for (let t = FLUX_N - 1 - off; t > FLUX_N - 1 - 6 * P && t >= 0; t -= P) {
+      s += fluxAt(Math.round(t));
+    }
+    if (s > bestSum) { bestSum = s; bestPhase = off; }
+  }
+  // Seconds since the most recent grid beat.
+  state.beatOffset = bestPhase / FLUX_HZ;
+  state.beatAnchor = state.t - state.beatOffset;
+}
+
+/** Phase within the current beat, 0 at the beat, rising to 1 just before the next. */
+function tempoPhase() {
+  if (!state.bpm || state.bpmConf < 0.12) return null;
+  const period = 60 / state.bpm;
+  const since = (state.t - state.beatAnchor) % period;
+  return { phase: since / period, period };
+}
+
 function onBeat() {
+  // With a locked tempo the grid fires these instead, so don't double up.
+  if (cfg.tempoSync && state.bpmConf >= 0.12 && state.bpm) return;
   if (cfg.mode === 'particles') spawnBurst();
   if (cfg.mode === 'rings') state.shocks.push({ r: 0, a: 1, c: Math.random() });
 }
@@ -2966,7 +3228,7 @@ function roundRect(x, y, w, h, r) {
 function drawBars() {
   const n = cfg.barCount | 0;
   const baseY = cfg.mirror ? H / 2 : H * 0.96;
-  const maxH = (cfg.mirror ? H / 2 : H * 0.9) * (1 + state.bass * 0.12 * cfg.pulse);
+  const maxH = (cfg.mirror ? H / 2 : H * 0.9) * (1 + pulseDrive() * 0.12 * cfg.pulse);
 
   if (stereoOn()) {
     // Low frequencies meet at the centre line, each channel running outward.
@@ -3038,7 +3300,7 @@ function barRun(data, n, x0, dir, slot, baseY, maxH, pOff) {
 function drawRadial() {
   const n = cfg.barCount | 0;
   const cx = W / 2, cy = H / 2;
-  const R = Math.min(W, H) * (0.20 + state.bass * 0.06 * cfg.pulse);
+  const R = Math.min(W, H) * (0.20 + pulseDrive() * 0.06 * cfg.pulse);
   const maxLen = Math.min(W, H) * 0.30;
 
   ctx.save();
@@ -3181,7 +3443,7 @@ function drawBlob() {
   const N = 128;
   const v = polarPoints(N);
   const cx = W / 2, cy = H / 2;
-  const base = Math.min(W, H) * (0.19 + state.bass * 0.09 * cfg.pulse);
+  const base = Math.min(W, H) * (0.19 + pulseDrive() * 0.09 * cfg.pulse);
   const amp = Math.min(W, H) * 0.17;
 
   const pts = [];
@@ -3335,7 +3597,7 @@ function drawRings() {
 
 function ringArc(v, i, n, R, a0, span) {
   const t = i / Math.max(1, n - 1);
-  const r = R * (0.22 + t * 0.72) * (1 + v * 0.16 * cfg.pulse);
+  const r = R * (0.22 + t * 0.72) * (1 + (v + state.tempoPulse * cfg.tempoAmount * 0.5) * 0.16 * cfg.pulse);
   strokeBloom(() => { ctx.beginPath(); ctx.arc(0, 0, r, a0, a0 + span); },
               t, cfg.lineWidth * (0.6 + v * 3), 0.35 + v * 0.65);
 }
@@ -3365,6 +3627,10 @@ function drawCenterArt(radius) {
 /* ============================ player skins ================================ */
 
 const secPerRev = () => 60 / (cfg.vinylRPM || 33);
+
+/* Combined drive for anything that 'pulses': bass energy plus, when the
+   tempo is locked, a predicted on-beat kick. */
+const pulseDrive = () => state.bass + (cfg.tempoSync ? state.tempoPulse * cfg.tempoAmount : 0);
 
 /** Geometry shared by the skins and by pointer hit-testing. */
 function skinGeom() {
@@ -3916,6 +4182,27 @@ function drawLyrics() {
   ctx.restore();
 }
 
+function drawBpm() {
+  if (!cfg.showBpm || !cfg.tempoSync || !state.bpm || state.bpmConf < 0.12) return;
+  const s = Math.max(11, Math.min(W * 0.013, 18));
+  const x = W - 26, y = 26;
+  ctx.save();
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'top';
+  ctx.shadowBlur = 10; ctx.shadowColor = 'rgba(0,0,0,.85)';
+  // The dot blinks on the predicted beat, so a wrong lock is obvious.
+  const tp = tempoPhase();
+  const hot = tp && tp.phase < 0.16;
+  ctx.font = `700 ${s * 1.25}px ui-sans-serif,system-ui,sans-serif`;
+  ctx.fillStyle = hot ? colorAt(0.2, 1) : 'rgba(240,242,250,.72)';
+  ctx.fillText(`${Math.round(state.bpm)} BPM${state.bpmManual ? ' ·' : ''}`, x, y);
+  ctx.beginPath();
+  ctx.arc(x + 8, y + s * 0.75, hot ? 5 : 3, 0, 7);
+  ctx.fillStyle = hot ? colorAt(0.2, 1) : 'rgba(240,242,250,.35)';
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawInfo() {
   if (!cfg.showInfo || !state.title) return;
   ctx.save();
@@ -3960,6 +4247,7 @@ function frame(now) {
   drawVignette();
   drawLyrics();
   drawInfo();
+  drawBpm();
 
   // Remember where we are, so a reload can pick the track back up.
   if (state.trackId && transport.duration && state.t - (state._saved || 0) > 3) {
