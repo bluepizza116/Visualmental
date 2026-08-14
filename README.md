@@ -214,6 +214,30 @@ The artwork turns with the disc, as a real CD does. **Spin the art** turns that
 off if you would rather keep the cover upright and readable — the sheen and
 rings keep rotating either way, so the disc still reads as spinning.
 
+## Phone and TV
+
+The layout adapts from a `data-ui` mode on the document — driven by pointer
+type and viewport, not width alone, because TV browsers report odd viewports
+and forcing a mode is useful for testing. **Display → Layout** overrides the
+automatic choice.
+
+**Touch.** The control panel and library become bottom sheets that stop above
+the player rather than under it, so the transport stays reachable while you
+browse. Hit targets go to 44px minimum, row actions drop their hover
+dependency, the backing store is capped at 1.5x since phones lose more to
+overdraw than they gain from it, and the chrome no longer auto-hides — tap
+empty stage to toggle it instead.
+
+**TV.** Everything scales up about 1.75x with 44px overscan margins, since many
+sets crop the outer few percent of the picture. Arrow keys move focus
+geometrically to the nearest control, so a remote works without any hard-coded
+tab order; Enter activates, Escape or Back closes the open panel. With the
+chrome hidden, left and right go back to scrubbing rather than moving focus.
+Focus rings are deliberately loud enough to read from across a room.
+
+The transport row's height is measured rather than assumed, and the lyrics and
+track-title overlays key off it, so nothing is drawn underneath it at any size.
+
 ## Customization
 
 Everything in the panel is live and persists to `localStorage`:

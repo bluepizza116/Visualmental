@@ -252,10 +252,118 @@ body.libopen #library{ transform:none; opacity:1; pointer-events:auto }
 kbd{background:rgba(255,255,255,.1); border:1px solid var(--line); border-bottom-width:2px;
   border-radius:6px; padding:1px 6px; font:12px ui-monospace,monospace}
 
+/* =================== adaptive UI: touch and TV =========================== */
+/* Driven by data-ui on <html> rather than width alone, so the mode can be
+   forced — TV browsers report odd viewports, and testing needs it too. */
+
+:root{ --ui:1; --safeT:env(safe-area-inset-top,0px); --safeB:env(safe-area-inset-bottom,0px);
+       --safeL:env(safe-area-inset-left,0px); --safeR:env(safe-area-inset-right,0px); }
+
+.btn:focus-visible, select:focus-visible, input:focus-visible,
+.trk:focus-visible, .pl:focus-visible, .tabs button:focus-visible, summary:focus-visible{
+  outline:3px solid var(--a2); outline-offset:2px;
+}
+
+/* ---------- touch: phones and tablets ---------- */
+html[data-ui="touch"]{ --ui:1.12 }
+html[data-ui="touch"] .topbar{
+  padding:calc(8px + var(--safeT)) 10px 8px; gap:6px; flex-wrap:nowrap; overflow-x:auto;
+  scrollbar-width:none;
+}
+html[data-ui="touch"] .topbar::-webkit-scrollbar{display:none}
+html[data-ui="touch"] .btn{padding:11px 14px; min-height:44px}
+html[data-ui="touch"] .btn.icon{min-width:44px; justify-content:center}
+html[data-ui="touch"] .brand{font-size:15px; flex:0 0 auto}
+/* Without these the toolbar squeezes each button and wraps its label onto a
+   second line, doubling the bar's height. */
+html[data-ui="touch"] .topbar .btn{white-space:nowrap; flex:0 0 auto}
+html[data-ui="touch"] .topbar .badge{display:none}
+html[data-ui="touch"] .topbar .spacer{display:none}
+
+/* Panels become bottom sheets that slide up over the visualizer. */
+/* Sheets stop above the player rather than under it — the transport stays
+   reachable while you browse, which is the whole point of a mini-player. */
+html[data-ui="touch"] #panel,
+html[data-ui="touch"] #library{
+  top:auto; left:0; right:0; width:auto;
+  bottom:var(--playerH, 132px);
+  max-height:calc(100vh - var(--playerH, 132px) - 62px);
+  max-height:calc(100dvh - var(--playerH, 132px) - 62px);
+  border-radius:18px 18px 0 0;
+  transform:translateY(calc(100% + var(--playerH, 132px))); opacity:1;
+  transition:transform .3s cubic-bezier(.22,.9,.3,1);
+}
+html[data-ui="touch"] body:not(.nopanel) #panel{transform:translateY(0)}
+html[data-ui="touch"] body.libopen #library{transform:translateY(0); opacity:1; pointer-events:auto}
+html[data-ui="touch"] #panel::before,
+html[data-ui="touch"] #library::before{
+  content:""; position:absolute; top:7px; left:50%; transform:translateX(-50%);
+  width:38px; height:4px; border-radius:4px; background:rgba(255,255,255,.28);
+}
+html[data-ui="touch"] .phead{padding-top:18px}
+
+html[data-ui="touch"] #player{
+  left:0; right:0; bottom:0; border-radius:16px 16px 0 0;
+  padding:10px 12px calc(10px + var(--safeB));
+  gap:8px; flex-wrap:wrap;
+}
+html[data-ui="touch"] .meta{flex:1 1 100%; order:-1; display:block}
+html[data-ui="touch"] #vol, html[data-ui="touch"] #volIcon{display:none}
+html[data-ui="touch"] #art{width:44px;height:44px;flex:0 0 44px}
+html[data-ui="touch"] .seekwrap{flex:1 1 100%; order:2}
+html[data-ui="touch"] #player .btn.icon{min-width:48px; min-height:48px; font-size:17px}
+
+/* Row actions can't rely on hover. */
+html[data-ui="touch"] .trk .x, html[data-ui="touch"] .trk .q,
+html[data-ui="tv"] .trk .x, html[data-ui="tv"] .trk .q{opacity:.75}
+html[data-ui="touch"] .trk{padding:11px 8px}
+html[data-ui="touch"] .trk img, html[data-ui="touch"] .trk .ph{width:46px;height:46px;flex:0 0 46px}
+html[data-ui="touch"] .trk .x, html[data-ui="touch"] .trk .q{padding:8px 10px; font-size:17px}
+html[data-ui="touch"] .row label{flex:0 0 104px}
+html[data-ui="touch"] input[type=range]{height:34px}
+html[data-ui="touch"] .sw{width:52px;height:30px;flex:0 0 52px}
+html[data-ui="touch"] .sw i::after{width:24px;height:24px}
+html[data-ui="touch"] .sw input:checked + i::after{transform:translateX(22px)}
+/* The chrome must not fade out from under a finger. */
+html[data-ui="touch"] body.idle .chrome{opacity:1; pointer-events:auto}
+html[data-ui="touch"] body.idle{cursor:auto}
+html[data-ui="touch"] #toast{bottom:calc(var(--playerH, 132px) + 14px); max-width:88vw}
+html[data-ui="tv"] #toast{bottom:calc(var(--playerH, 150px) + 60px); font-size:18px; padding:14px 22px}
+
+/* ---------- TV: lean-back, remote-driven ---------- */
+html[data-ui="tv"]{ --ui:1.75 }
+html[data-ui="tv"] body{font-size:calc(14px * var(--ui))}
+/* Overscan: many sets crop the outer few percent of the picture. */
+html[data-ui="tv"] .topbar{padding:calc(28px + var(--safeT)) 44px 20px; gap:12px}
+html[data-ui="tv"] .btn{padding:14px 22px; font-size:17px; border-radius:13px}
+html[data-ui="tv"] .brand{font-size:22px}
+html[data-ui="tv"] #panel{top:110px; right:44px; bottom:170px; width:520px; border-radius:20px}
+html[data-ui="tv"] #library{top:110px; left:44px; bottom:170px; width:560px; border-radius:20px}
+html[data-ui="tv"] #player{left:44px; right:44px; bottom:calc(36px + var(--safeB)); padding:18px 24px; gap:20px; border-radius:20px}
+html[data-ui="tv"] #art{width:78px;height:78px;flex:0 0 78px;border-radius:12px}
+html[data-ui="tv"] .meta{flex:0 1 380px}
+html[data-ui="tv"] .meta .t{font-size:20px}
+html[data-ui="tv"] .meta .s{font-size:15px}
+html[data-ui="tv"] #player .btn.icon{min-width:60px; min-height:60px; font-size:22px}
+html[data-ui="tv"] .trk{padding:13px 10px}
+html[data-ui="tv"] .trk img, html[data-ui="tv"] .trk .ph{width:56px;height:56px;flex:0 0 56px}
+html[data-ui="tv"] .trk .n{font-size:17px}
+html[data-ui="tv"] .trk .a{font-size:14px}
+html[data-ui="tv"] .row label{flex:0 0 170px; font-size:15px}
+html[data-ui="tv"] .phead h2{font-size:16px}
+html[data-ui="tv"] .tabs button{font-size:16px; padding:12px 6px}
+html[data-ui="tv"] .sw{width:58px;height:32px;flex:0 0 58px}
+html[data-ui="tv"] .sw i::after{width:26px;height:26px}
+html[data-ui="tv"] .sw input:checked + i::after{transform:translateX(26px)}
+/* Focus has to be unmistakable from three metres away. */
+html[data-ui="tv"] :focus-visible{outline:4px solid var(--a2); outline-offset:3px}
+html[data-ui="tv"] .trk:focus-visible, html[data-ui="tv"] .pl:focus-visible{background:rgba(255,255,255,.14)}
+
 @media (max-width:820px){
-  #panel{top:58px; left:12px; right:12px; width:auto; bottom:auto; max-height:52vh}
-  .meta{display:none} #vol{display:none}
-  .topbar{padding:10px 12px; gap:7px; flex-wrap:wrap}
+  html[data-ui="desktop"] #panel{top:58px; left:12px; right:12px; width:auto; bottom:auto; max-height:52vh}
+  html[data-ui="desktop"] .meta{display:none}
+  html[data-ui="desktop"] #vol{display:none}
+  html[data-ui="desktop"] .topbar{padding:10px 12px; gap:7px; flex-wrap:wrap}
 }
 </style>
 </head>
@@ -421,6 +529,7 @@ const DEFAULTS = {
   // overlays
   showCover: true, showInfo: true,
   showLyrics: true, lyricsAuto: true, lyricsSize: 1, lyricsPos: 'bottom', coverAuto: true,
+  uiMode: 'auto',   // auto | desktop | touch | tv
 
   // player skin — an independent layer drawn over whichever spectrum mode is active
   skin: 'none',                 // none | vinyl | cd | tape
@@ -519,6 +628,11 @@ const SCHEMA = [
     { k: '_coverfetch', t: 'button', label: 'Find cover art now', action: () => findCover(true) },
     { k: '_coverhint', t: 'note', label: 'Artwork lookup needs the download service (it proxies the image so palette extraction keeps working).' },
   ]},
+  { title: 'Display', items: [
+    { k: 'uiMode', t: 'select', label: 'Layout', options: [
+      ['auto','Automatic'], ['desktop','Desktop'], ['touch','Touch / phone'], ['tv','TV / big screen'] ] },
+    { k: '_uihint', t: 'note', label: 'Touch gives bottom sheets and larger targets; TV scales everything up and lets a remote drive focus with the arrow keys.' },
+  ]},
   { title: 'Presets', items: [
     { k: '_presets', t: 'presets' },
   ]},
@@ -552,6 +666,7 @@ const state = {
   peakV: new Float32Array(512),
   levelL: 0, levelR: 0,
   file: null,                    // the File itself, so the turntable can decode it
+  playerH: 90,                   // measured height of the transport row
   discAngle: 0, reelAngle: 0, cdAngle: 0,
   rate: 1,                       // effective playback rate, drives the platter
   grab: null,                    // live scratch gesture
@@ -1202,6 +1317,8 @@ const rgb2hex = c => '#' + [c.r, c.g, c.b].map(v => clamp(Math.round(v), 0, 255)
  * area it covers *and* how vivid it is, then greedily pick well-separated
  * winners so the palette isn't five shades of the same brown.
  */
+const BLANK_PX = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
 const FALLBACK_PALETTE = [{ r: 124, g: 92, b: 255 }, { r: 0, g: 212, b: 255 }, { r: 255, g: 77, b: 141 }];
 
 function extractPalette(img, count = 6) {
@@ -1423,7 +1540,7 @@ function setCover(url) {
 function clearCover() {
   if (state.coverURL) URL.revokeObjectURL(state.coverURL);
   state.cover = null; state.coverURL = null; state.palette = [];
-  $('#art').removeAttribute('src');
+  $('#art').src = BLANK_PX;   // an empty src renders as a broken-image icon
   rebuildRamp();
 }
 
@@ -2624,6 +2741,7 @@ function refreshControls() {
 function onChange(key) {
   if (key === '*' || ['fftSize', 'smoothing', 'minDb', 'maxDb'].includes(key)) applyAnalyser();
   if (key === '*' || key === 'skin') syncEngine();
+  if (key === '*' || key === 'uiMode') applyUIMode();
   else if (key === 'vinylCondition' || key === 'tapeQuality') applyWear();
   if (key === '*') refreshControls();
   else {
@@ -2651,8 +2769,9 @@ const canvas = $('#stage');
 const ctx = canvas.getContext('2d', { alpha: false });
 let W = 0, H = 0, DPR = 1;
 
+let DPR_CAP = 2;
 function resize() {
-  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  DPR = Math.min(window.devicePixelRatio || 1, DPR_CAP);
   W = canvas.clientWidth; H = canvas.clientHeight;
   canvas.width = Math.round(W * DPR);
   canvas.height = Math.round(H * DPR);
@@ -3702,7 +3821,7 @@ function drawLyrics() {
   const margin = span * step + base;
   // The player bar owns the bottom of the screen; lines drawn under it are
   // both hidden and unclickable, since the click lands on the UI instead.
-  const floor = H - 100;
+  const floor = H - (state.playerH || 100) - 16;
   const cy = clamp(cfg.lyricsPos === 'center' ? H * 0.5 : H * 0.76,
                    Math.min(margin, H / 2), Math.max(floor - margin, H / 2));
 
@@ -3744,12 +3863,15 @@ function drawInfo() {
   ctx.save();
   ctx.textBaseline = 'top';
   ctx.shadowBlur = 12; ctx.shadowColor = 'rgba(0,0,0,.85)';
+  // Sit above the transport row rather than behind it.
+  const base = H - (state.playerH || 90) - 22;
+  const big = clamp(W * 0.022, 15, 30), small = clamp(W * 0.015, 12, 19);
   ctx.fillStyle = 'rgba(255,255,255,.94)';
-  ctx.font = `600 ${clamp(W * 0.022, 15, 30)}px ui-sans-serif,system-ui,sans-serif`;
-  ctx.fillText(state.title, 26, H - 26 - clamp(W * 0.022, 15, 30) * 2.2);
+  ctx.font = `600 ${big}px ui-sans-serif,system-ui,sans-serif`;
+  ctx.fillText(state.title, 26, base - big * 1.5);
   ctx.fillStyle = 'rgba(255,255,255,.62)';
-  ctx.font = `400 ${clamp(W * 0.015, 12, 19)}px ui-sans-serif,system-ui,sans-serif`;
-  ctx.fillText(state.artist, 26, H - 26 - clamp(W * 0.015, 12, 19) * 1.2);
+  ctx.font = `400 ${small}px ui-sans-serif,system-ui,sans-serif`;
+  ctx.fillText(state.artist, 26, base - small * 0.2);
   ctx.restore();
 }
 
@@ -3955,6 +4077,22 @@ const endGrab = e => {
   syncTransportUI();
 };
 canvas.addEventListener('pointerup', endGrab);
+
+// Touch has no hover and no idle fade, so a tap on empty stage toggles the UI.
+let tapStart = 0, tapPt = null;
+canvas.addEventListener('pointerdown', e => {
+  if (uiMode !== 'touch') return;
+  tapStart = performance.now(); tapPt = { x: e.offsetX, y: e.offsetY };
+}, true);
+canvas.addEventListener('pointerup', e => {
+  if (uiMode !== 'touch' || !tapPt) return;
+  const moved = Math.hypot(e.offsetX - tapPt.x, e.offsetY - tapPt.y);
+  const quick = performance.now() - tapStart < 350;
+  tapPt = null;
+  if (!quick || moved > 12 || state.grab) return;
+  if (overRecord(e.offsetX, e.offsetY)) return;      // that was a scratch
+  document.body.classList.toggle('hideui');
+});
 canvas.addEventListener('pointercancel', endGrab);
 
 /* ---- tape voice-over ---------------------------------------------------- */
@@ -4188,6 +4326,7 @@ addEventListener('drop', async e => {
 });
 
 addEventListener('keydown', e => {
+  if (remoteKey(e)) { e.preventDefault(); return; }
   if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
   const k = e.key.toLowerCase();
   if (k === ' ') { e.preventDefault(); playPause(); }
@@ -4221,13 +4360,141 @@ let idleTimer = 0;
 const wake = () => {
   document.body.classList.remove('idle');
   clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => document.body.classList.add('idle'), 2800);
+  idleTimer = setTimeout(() => document.body.classList.add('idle'),
+                         uiMode === 'touch' ? 1e9 : uiMode === 'tv' ? 6000 : 2800);
 };
 ['mousemove', 'mousedown', 'keydown', 'touchstart', 'wheel'].forEach(ev => addEventListener(ev, wake, { passive: true }));
+
+/* ========================= adaptive UI + remote ========================== */
+
+// Set-top boxes and TV browsers rarely look like anything else, so sniff them
+// explicitly rather than guessing from viewport size alone.
+const TV_UA = /\b(smart-?tv|googletv|appletv|hbbtv|netcast|web0s|webos|tizen|viera|bravia|aft[bmnst]|crkey|philipstv|nettv)\b/i;
+
+function detectUI() {
+  if (cfg.uiMode && cfg.uiMode !== 'auto') return cfg.uiMode;
+  const coarse = matchMedia('(pointer: coarse)').matches;
+  const none = matchMedia('(pointer: none)').matches;
+  const w = innerWidth, h = innerHeight;
+  if (TV_UA.test(navigator.userAgent) || (none && w >= 1280)) return 'tv';
+  // A big landscape screen with no fine pointer is almost certainly a TV.
+  if ((coarse || none) && w >= 1600 && w > h) return 'tv';
+  if (coarse || Math.min(w, h) < 680) return 'touch';
+  return 'desktop';
+}
+
+let uiMode = 'desktop';
+
+function applyUIMode() {
+  const m = detectUI();
+  if (m === uiMode && document.documentElement.dataset.ui) return;
+  uiMode = m;
+  document.documentElement.dataset.ui = m;
+
+  // Phones lose more to overdraw than they gain from a 3x backing store.
+  DPR_CAP = m === 'touch' ? 1.5 : 2;
+  resize();
+
+  if (m === 'touch') {
+    // Bottom sheets start closed; a phone screen is too small to share.
+    document.body.classList.add('nopanel');
+    document.body.classList.remove('libopen');
+  }
+  if (m === 'tv') focusables();      // prime the roving focus ring
+}
+
+/* ---- remote / D-pad navigation ------------------------------------------ */
+/* TV remotes send arrow keys and Enter. Focus moves geometrically to the
+   nearest control in the pressed direction, which behaves sanely across the
+   panel, the library list and the transport row without hard-coded ordering. */
+
+function focusables() {
+  const sel = 'button:not([disabled]), select, input:not([type=hidden]), .trk, .pl, summary';
+  return [...document.querySelectorAll(sel)].filter(el => {
+    if (el.closest('#splash.gone')) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4) return false;
+    if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return false;
+    return getComputedStyle(el).visibility !== 'hidden';
+  });
+}
+
+function moveFocus(dx, dy) {
+  const list = focusables();
+  if (!list.length) return false;
+  const cur = document.activeElement && list.includes(document.activeElement)
+    ? document.activeElement : null;
+  if (!cur) { list[0].focus(); return true; }
+
+  const a = cur.getBoundingClientRect();
+  const ax = a.left + a.width / 2, ay = a.top + a.height / 2;
+  let best = null, bestScore = Infinity;
+
+  for (const el of list) {
+    if (el === cur) continue;
+    const b = el.getBoundingClientRect();
+    const bx = b.left + b.width / 2, by = b.top + b.height / 2;
+    const vx = bx - ax, vy = by - ay;
+    // Must be meaningfully in the pressed direction.
+    if (dx && Math.sign(vx) !== Math.sign(dx)) continue;
+    if (dy && Math.sign(vy) !== Math.sign(dy)) continue;
+    const along = Math.abs(dx ? vx : vy);
+    const across = Math.abs(dx ? vy : vx);
+    if (along < 4) continue;
+    // Penalise sideways drift so a press goes where it looks like it should.
+    const score = along + across * 2.5;
+    if (score < bestScore) { bestScore = score; best = el; }
+  }
+  if (best) { best.focus(); best.scrollIntoView({ block: 'nearest' }); return true; }
+  return false;
+}
+
+function remoteKey(e) {
+  if (uiMode !== 'tv') return false;
+  const k = e.key;
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
+  const chromeHidden = document.body.classList.contains('idle') ||
+                       document.body.classList.contains('hideui');
+
+  if (k === 'Escape' || k === 'Backspace' || k === 'BrowserBack') {
+    if (document.body.classList.contains('libopen')) { toggleLibrary(false); return true; }
+    if (!document.body.classList.contains('nopanel')) { document.body.classList.add('nopanel'); return true; }
+    return false;
+  }
+  if (typing) return false;
+
+  // With the chrome hidden this is lean-back: left/right scrub instead.
+  if (chromeHidden && (k === 'ArrowLeft' || k === 'ArrowRight')) return false;
+  if (k === 'ArrowLeft')  return moveFocus(-1, 0);
+  if (k === 'ArrowRight') return moveFocus(1, 0);
+  if (k === 'ArrowUp')    return moveFocus(0, -1);
+  if (k === 'ArrowDown')  return moveFocus(0, 1);
+  return false;
+}
+
+/* The player bar's height changes with the layout and the loaded track, and
+   the bottom sheets are positioned off it, so measure rather than guess. */
+function trackPlayerHeight() {
+  const el = $('#player');
+  if (!el) return;
+  const set = () => {
+    const h = Math.round(el.getBoundingClientRect().height);
+    state.playerH = h;
+    document.documentElement.style.setProperty('--playerH', h + 'px');
+  };
+  set();
+  if (window.ResizeObserver) new ResizeObserver(set).observe(el);
+  addEventListener('resize', set);
+}
+
+addEventListener('resize', applyUIMode);
+matchMedia('(pointer: coarse)').addEventListener?.('change', applyUIMode);
 
 /* --------------------------------------------------------------- bootstrap */
 
 restoreConfig();
+applyUIMode();
+trackPlayerHeight();
 buildControls();
 resize();
 rebuildRamp();
