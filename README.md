@@ -179,8 +179,12 @@ the library and reload with it.
 ### CD
 
 A spinning disc with the album art in the data area, fine track rings, a clear
-plastic hub, and a diffraction sheen of tight rainbow lobes that sweep as it
-turns. Spin speed, sheen strength and art on/off are all adjustable.
+plastic hub, and a diffraction sheen that sweeps across it as it turns. Spin
+speed, sheen strength and art on/off are all adjustable.
+
+The artwork turns with the disc, as a real CD does. **Spin the art** turns that
+off if you would rather keep the cover upright and readable — the sheen and
+rings keep rotating either way, so the disc still reads as spinning.
 
 ## Customization
 

@@ -383,7 +383,10 @@ const DEFAULTS = {
   skin: 'none',                 // none | vinyl | cd | tape
   skinSize: 1, skinOpacity: 1, skinDim: 0.35,
   vinylCondition: 0.85, vinylRPM: 33, tonearm: true, vinylLabelArt: true,
-  cdSpin: 1, cdSheen: 0.65, cdArt: true, cdArtSpin: false,
+  cdSpin: 1, cdSheen: 0.65, cdArt: true,
+  // Renamed from cdArtSpin so the `false` the previous build saved into
+  // localStorage is ignored rather than pinning this off.
+  cdSpinArt: true,
   tapeQuality: 0.8, tapeSpin: 1,
 };
 
@@ -414,7 +417,7 @@ const SCHEMA = [
     { k: 'cdSpin',  t: 'range',  label: 'Spin',   min: 0, max: 3, step: .01, show: c => c.skin === 'cd' },
     { k: 'cdSheen', t: 'range',  label: 'Sheen',  min: 0, max: 1, step: .01, show: c => c.skin === 'cd' },
     { k: 'cdArt',     t: 'toggle', label: 'Album art', show: c => c.skin === 'cd' },
-    { k: 'cdArtSpin', t: 'toggle', label: 'Spin the art', show: c => c.skin === 'cd' && c.cdArt },
+    { k: 'cdSpinArt', t: 'toggle', label: 'Spin the art', show: c => c.skin === 'cd' && c.cdArt },
 
     { k: 'tapeQuality', t: 'range', label: 'Tape quality', min: 0, max: 1, step: .01, show: c => c.skin === 'tape' },
     { k: 'tapeSpin',    t: 'range', label: 'Reel speed',   min: 0, max: 3, step: .01, show: c => c.skin === 'tape' },
@@ -3092,9 +3095,9 @@ function drawCD() {
 
   ctx.save();
   ctx.translate(cx, cy);
-  // The artwork can either turn with the disc (what a real CD does) or stay
-  // upright, because a spinning cover ends up sideways and unreadable.
-  ctx.rotate(cfg.cdArtSpin ? state.cdAngle : 0);
+  // The artwork turns with the disc, as a real CD does. Turning this off
+  // holds the cover upright and readable while the disc still spins.
+  ctx.rotate(cfg.cdSpinArt ? state.cdAngle : 0);
 
   ctx.beginPath();
   ctx.arc(0, 0, R, 0, Math.PI * 2);
@@ -3129,7 +3132,7 @@ function drawCD() {
 
   // Everything from here spins regardless, so the disc still reads as turning
   // even when the artwork is held upright.
-  ctx.rotate(cfg.cdArtSpin ? 0 : state.cdAngle);
+  ctx.rotate(cfg.cdSpinArt ? 0 : state.cdAngle);
 
   // Diffraction sheen. Drawn as a couple of broad gradient bands rather than
   // many pie wedges: wedges band into visible spokes over flat artwork, which
