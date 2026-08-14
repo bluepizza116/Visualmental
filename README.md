@@ -208,6 +208,31 @@ heavier saturation, faster wow — plus visible grain.
 — what the song is about, who it's for. Notes are stored against the track in
 the library and reload with it.
 
+### Reel-to-reel
+
+An open deck with two reels, a visible tape path and a head block. The tape
+pack moves from the supply reel to the takeup as the track plays, and because a
+reel deck pulls tape at a constant linear speed, **the emptier reel turns
+faster** — angular speed goes as 1/radius, which is what makes it read as a
+real machine rather than two spinning discs.
+
+Two VU meters carry the left and right levels with proper ballistics — quick to
+rise, slow to fall. They show the channels separately whether or not Stereo
+split is on. Tape quality drives the same wear DSP as the cassette.
+
+### MiniDisc
+
+A caddy with a sliding metal shutter over a recessed window; the disc spins
+behind it carrying the album art, with an iridescent wash and a clamping hub.
+*Shutter* controls how far it is open.
+
+### Boombox
+
+Twin woofers that pulse on their own channel — the clearest use of the stereo
+analysis anywhere in the app — over a cassette window with turning reels and a
+spectrum LED strip driven by the real bands. The cones also take a kick from
+the tempo grid, so they move on the beat rather than merely with the volume.
+
 ### CD
 
 A spinning disc with the album art in the data area, fine track rings, a clear

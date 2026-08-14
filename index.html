@@ -546,9 +546,15 @@ const DEFAULTS = {
   // localStorage is ignored rather than pinning this off.
   cdSpinArt: true,
   tapeQuality: 0.8, tapeSpin: 1,
+  reelVU: true, mdSpin: 1, mdShutter: 0.72, bbLeds: true, bbWoofer: 1,
 };
 
-const SKINS = [['none', 'None'], ['vinyl', 'Vinyl turntable'], ['cd', 'CD'], ['tape', 'Cassette']];
+const SKINS = [['none', 'None'], ['vinyl', 'Vinyl turntable'], ['cd', 'CD'],
+               ['tape', 'Cassette'], ['reel', 'Reel-to-reel'],
+               ['md', 'MiniDisc'], ['boombox', 'Boombox']];
+
+// Skins whose surface is magnetic tape share the wear DSP and the scrubbing engine.
+const TAPE_SKINS = new Set(['tape', 'reel']);
 
 const SCHEMA = [
   { title: 'Mode', open: true, items: [
@@ -577,9 +583,16 @@ const SCHEMA = [
     { k: 'cdArt',     t: 'toggle', label: 'Album art', show: c => c.skin === 'cd' },
     { k: 'cdSpinArt', t: 'toggle', label: 'Spin the art', show: c => c.skin === 'cd' && c.cdArt },
 
-    { k: 'tapeQuality', t: 'range', label: 'Tape quality', min: 0, max: 1, step: .01, show: c => c.skin === 'tape' },
-    { k: 'tapeSpin',    t: 'range', label: 'Reel speed',   min: 0, max: 3, step: .01, show: c => c.skin === 'tape' },
-    { k: '_rec',        t: 'record', show: c => c.skin === 'tape' },
+    { k: 'tapeQuality', t: 'range', label: 'Tape quality', min: 0, max: 1, step: .01, show: c => TAPE_SKINS.has(c.skin) },
+    { k: 'tapeSpin',    t: 'range', label: 'Reel speed',   min: 0, max: 3, step: .01, show: c => TAPE_SKINS.has(c.skin) },
+    { k: 'reelVU',      t: 'toggle', label: 'VU meters',   show: c => c.skin === 'reel' },
+    { k: '_rec',        t: 'record', show: c => TAPE_SKINS.has(c.skin) },
+
+    { k: 'mdSpin',    t: 'range', label: 'Disc speed',  min: 0, max: 3, step: .01, show: c => c.skin === 'md' },
+    { k: 'mdShutter', t: 'range', label: 'Shutter',     min: 0, max: 1, step: .01, show: c => c.skin === 'md' },
+
+    { k: 'bbLeds',   t: 'toggle', label: 'Spectrum LEDs', show: c => c.skin === 'boombox' },
+    { k: 'bbWoofer', t: 'range',  label: 'Woofer travel', min: 0, max: 2, step: .01, show: c => c.skin === 'boombox' },
   ]},
   { title: 'Bars', open: true, show: c => ['bars','radial'].includes(c.mode), items: [
     { k: 'barCount',  t: 'range',  label: 'Count',      min: 12, max: 256, step: 1 },
@@ -690,7 +703,8 @@ const state = {
   levelL: 0, levelR: 0,
   file: null,                    // the File itself, so the turntable can decode it
   playerH: 90,                   // measured height of the transport row
-  discAngle: 0, reelAngle: 0, cdAngle: 0,
+  discAngle: 0, reelAngle: 0, cdAngle: 0, reelAngL: 0, reelAngR: 0, mdAngle: 0,
+  vuL: 0, vuR: 0,
   rate: 1,                       // effective playback rate, drives the platter
   grab: null,                    // live scratch gesture
   spinDown: 0,                   // momentum left over from a flick
@@ -999,7 +1013,7 @@ function buildWearChain() {
 /** Map the condition slider (1 = mint, 0 = trashed) onto the whole FX chain. */
 function applyWear() {
   if (!wearChain) return;
-  const vinyl = cfg.skin === 'vinyl', tape = cfg.skin === 'tape';
+  const vinyl = cfg.skin === 'vinyl', tape = TAPE_SKINS.has(cfg.skin);
   const cond = clamp(vinyl ? cfg.vinylCondition : tape ? cfg.tapeQuality : 1, 0, 1);
   const wear = 1 - cond;
   const on = vinyl || tape;
@@ -1125,7 +1139,7 @@ function syncTransportUI() {
 
 /** Swap engines when the skin changes, keeping the playhead where it was. */
 async function syncEngine() {
-  const wants = (cfg.skin === 'vinyl' || cfg.skin === 'tape') && state.sourceKind === 'file' && !!state.file;
+  const wants = (cfg.skin === 'vinyl' || TAPE_SKINS.has(cfg.skin)) && state.sourceKind === 'file' && !!state.file;
   if (wants && !usingTurntable()) {
     const at = audioEl.currentTime || 0, wasPlaying = !audioEl.paused;
     audioEl.pause();
@@ -2940,6 +2954,16 @@ function analyse(dt) {
     };
     state.levelL = lvl(freqL);
     state.levelR = lvl(freqR);
+  } else if (cfg.skin === 'reel' || cfg.skin === 'boombox') {
+    // These surfaces show the channels separately regardless of the split.
+    analyserL.getByteFrequencyData(freqL);
+    analyserR.getByteFrequencyData(freqR);
+    const lvl = src => {
+      const b = bandEnergy(20, 160, src), m = bandEnergy(160, 2000, src), t = bandEnergy(2000, 12000, src);
+      return clamp((b * 1.4 + m + t * 0.7) / 3 * cfg.sensitivity, 0, 1);
+    };
+    state.levelL = lvl(freqL);
+    state.levelR = lvl(freqR);
   } else {
     state.levelL = state.levelR = state.level;
   }
@@ -3650,6 +3674,9 @@ function drawSkin() {
   if (cfg.skin === 'vinyl') drawVinyl();
   else if (cfg.skin === 'cd') drawCD();
   else if (cfg.skin === 'tape') drawTape();
+  else if (cfg.skin === 'reel') drawReel();
+  else if (cfg.skin === 'md') drawMiniDisc();
+  else if (cfg.skin === 'boombox') drawBoombox();
   ctx.restore();
 }
 
@@ -4203,6 +4230,367 @@ function drawBpm() {
   ctx.restore();
 }
 
+/* ---- reel-to-reel -------------------------------------------------------- */
+
+function drawReel() {
+  const { cx, cy, R } = skinGeom();
+  const prog = transport.duration ? clamp(transport.time / transport.duration, 0, 1) : 0;
+  const wear = 1 - clamp(cfg.tapeQuality, 0, 1);
+  const hub = R * 0.15, maxPack = R * 0.52;
+  const packL = lerp(maxPack, hub * 1.08, prog);
+  const packR = lerp(hub * 1.08, maxPack, prog);
+  const sep = R * 0.78;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Deck plate.
+  const plate = ctx.createLinearGradient(0, -R, 0, R);
+  plate.addColorStop(0, 'rgba(52,50,48,0.95)');
+  plate.addColorStop(1, 'rgba(28,27,26,0.95)');
+  roundRect(-R * 1.28, -R * 0.92, R * 2.56, R * 1.92, R * 0.06);
+  ctx.fillStyle = plate;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // The tape spans between the two packs, past the head block.
+  ctx.strokeStyle = `rgba(78,56,40,${0.9 - wear * 0.25})`;
+  ctx.lineWidth = Math.max(2, R * 0.028);
+  ctx.beginPath();
+  ctx.moveTo(-sep, packL);
+  ctx.lineTo(-R * 0.30, R * 0.52);
+  ctx.lineTo(R * 0.30, R * 0.52);
+  ctx.lineTo(sep, packR);
+  ctx.stroke();
+
+  // Reels. Constant linear speed means the emptier reel turns faster — the
+  // detail that makes a reel deck read as real rather than two spinning discs.
+  for (const [x, pack, ang] of [[-sep, packL, state.reelAngL], [sep, packR, state.reelAngR]]) {
+    ctx.beginPath();
+    ctx.arc(x, 0, pack, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(66,46,32,0.96)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.save();
+    ctx.translate(x, 0);
+    ctx.rotate(ang);
+    // Flange with cut-outs.
+    ctx.beginPath();
+    ctx.arc(0, 0, maxPack * 1.03, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(215,220,232,0.30)';
+    ctx.lineWidth = Math.max(1.5, R * 0.014);
+    ctx.stroke();
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.arc(Math.cos(a) * maxPack * 0.72, Math.sin(a) * maxPack * 0.72, maxPack * 0.20, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(20,20,24,0.55)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(215,220,232,0.22)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(0, 0, hub, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(226,229,238,0.92)';
+    ctx.fill();
+    ctx.fillStyle = 'rgba(30,30,36,0.85)';
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2 + 0.4;
+      ctx.beginPath();
+      ctx.ellipse(Math.cos(a) * hub * 0.5, Math.sin(a) * hub * 0.5, hub * 0.26, hub * 0.16, a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // Head block.
+  roundRect(-R * 0.30, R * 0.40, R * 0.60, R * 0.20, R * 0.02);
+  ctx.fillStyle = 'rgba(38,38,44,0.95)';
+  ctx.fill();
+  for (let i = -1; i <= 1; i++) {
+    roundRect(i * R * 0.16 - R * 0.045, R * 0.425, R * 0.09, R * 0.11, R * 0.012);
+    ctx.fillStyle = i === 0 ? colorAt(0.4, 0.85) : 'rgba(190,196,210,0.75)';
+    ctx.fill();
+  }
+
+  // VU meters, driven by the per-channel levels the analyser already produces.
+  if (cfg.reelVU) {
+    const mw = R * 0.42, mh = R * 0.30, my = -R * 0.62;
+    for (const [i, lvl] of [[-1, state.vuL], [1, state.vuR]]) {
+      const mx = i * R * 0.34;
+      roundRect(mx - mw / 2, my - mh / 2, mw, mh, R * 0.02);
+      ctx.fillStyle = 'rgba(238,230,205,0.92)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      // Scale arc, red past 0VU.
+      const px = mx, py = my + mh * 0.34, rr = mh * 0.72;
+      ctx.lineWidth = Math.max(1.5, R * 0.01);
+      ctx.beginPath(); ctx.arc(px, py, rr, Math.PI * 1.18, Math.PI * 1.72);
+      ctx.strokeStyle = 'rgba(40,36,28,0.75)'; ctx.stroke();
+      ctx.beginPath(); ctx.arc(px, py, rr, Math.PI * 1.72, Math.PI * 1.84);
+      ctx.strokeStyle = 'rgba(190,40,30,0.85)'; ctx.stroke();
+      // Needle.
+      const a = Math.PI * (1.18 + clamp(lvl, 0, 1.1) * 0.66);
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + Math.cos(a) * rr * 0.94, py + Math.sin(a) * rr * 0.94);
+      ctx.strokeStyle = 'rgba(30,26,22,0.9)';
+      ctx.lineWidth = Math.max(1.2, R * 0.008);
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(px, py, R * 0.014, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(40,36,30,0.9)'; ctx.fill();
+    }
+  }
+
+  ctx.restore();
+  if (wear > 0.05) drawFuzz(wear * 0.3);
+}
+
+/* ---- minidisc ------------------------------------------------------------ */
+
+function drawMiniDisc() {
+  const { cx, cy, R } = skinGeom();
+  const w = R * 1.62, h = R * 1.54;
+  const open = clamp(cfg.mdShutter, 0, 1);
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Caddy.
+  const body = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
+  body.addColorStop(0, 'rgba(46,48,58,0.96)');
+  body.addColorStop(1, 'rgba(22,23,30,0.96)');
+  roundRect(-w / 2, -h / 2, w, h, R * 0.09);
+  ctx.fillStyle = body;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // The window is a recess in the caddy; the disc is only ever seen through
+  // the part of it the shutter has uncovered.
+  const winW = w * 0.80, winH = h * 0.56, winY = -h * 0.11;
+  const winX = -winW / 2;
+  roundRect(winX, winY - winH / 2, winW, winH, R * 0.03);
+  ctx.fillStyle = 'rgba(9,10,15,0.95)';
+  ctx.fill();
+
+  const openW = winW * open;
+  if (openW > 2) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(winX, winY - winH / 2, openW, winH);
+    ctx.clip();
+
+    const discR = winH * 0.46;
+    ctx.save();
+    ctx.translate(0, winY);
+    ctx.rotate(state.mdAngle);
+    ctx.beginPath();
+    ctx.arc(0, 0, discR, 0, Math.PI * 2);
+    if (cfg.cdArt && state.cover) {
+      ctx.save(); ctx.clip();
+      const img = state.cover;
+      const sc = Math.max((discR * 2) / img.width, (discR * 2) / img.height);
+      ctx.drawImage(img, -img.width * sc / 2, -img.height * sc / 2, img.width * sc, img.height * sc);
+      ctx.restore();
+    } else {
+      const g = ctx.createRadialGradient(0, 0, discR * 0.15, 0, 0, discR);
+      g.addColorStop(0, colorAt(0.2, 1));
+      g.addColorStop(1, colorAt(0.8, 1));
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
+    // Iridescent wash so it reads as a disc rather than a printed circle.
+    const sheen = ctx.createLinearGradient(-discR, -discR, discR, discR);
+    for (let i = 0; i <= 5; i++) {
+      const [r, g2, b] = hsl2rgb((i / 5 + state.t * 0.06) % 1, 0.9, 0.55);
+      sheen.addColorStop(i / 5, `rgba(${r|0},${g2|0},${b|0},${(0.13 * Math.sin((i / 5) * Math.PI)).toFixed(3)})`);
+    }
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.beginPath(); ctx.arc(0, 0, discR, 0, Math.PI * 2);
+    ctx.fillStyle = sheen; ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+    // Clamping hub.
+    ctx.beginPath(); ctx.arc(0, 0, discR * 0.22, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(190,196,210,0.9)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, discR * 0.10, 0, Math.PI * 2);
+    ctx.fillStyle = '#0b0b10'; ctx.fill();
+    ctx.restore();
+    ctx.restore();
+  }
+
+  // Metal shutter covering whatever is left of the window.
+  if (openW < winW - 1) {
+    roundRect(winX + openW, winY - winH / 2, winW - openW, winH, R * 0.02);
+    const sh = ctx.createLinearGradient(0, winY - winH / 2, 0, winY + winH / 2);
+    sh.addColorStop(0, 'rgba(184,190,204,0.97)');
+    sh.addColorStop(0.5, 'rgba(126,132,146,0.97)');
+    sh.addColorStop(1, 'rgba(164,170,184,0.97)');
+    ctx.fillStyle = sh;
+    ctx.fill();
+  }
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1;
+  roundRect(winX, winY - winH / 2, winW, winH, R * 0.03);
+  ctx.stroke();
+
+  // Paper label across the bottom — opaque, or the disc shows through it.
+  const lw = w * 0.86, lh = h * 0.19, ly = h * 0.5 - lh - h * 0.055;
+  roundRect(-lw / 2, ly, lw, lh, R * 0.015);
+  const lab = ctx.createLinearGradient(-lw / 2, 0, lw / 2, 0);
+  lab.addColorStop(0, colorAt(0.2, 1));
+  lab.addColorStop(1, colorAt(0.7, 1));
+  ctx.fillStyle = lab;
+  ctx.fill();
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(-lw / 2, ly, lw, lh);
+  ctx.clip();
+  ctx.fillStyle = 'rgba(8,8,12,0.88)';
+  ctx.font = `600 ${Math.max(9, R * 0.072)}px ui-sans-serif,system-ui,sans-serif`;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(state.title || 'Untitled', -lw / 2 + R * 0.05, ly + lh / 2);
+  ctx.restore();
+
+  ctx.restore();
+}
+
+/* ---- boombox ------------------------------------------------------------- */
+
+function drawBoombox() {
+  const { cx, cy, R } = skinGeom();
+  const w = R * 2.5, h = R * 1.5;
+  const prog = transport.duration ? clamp(transport.time / transport.duration, 0, 1) : 0;
+  const kick = state.bass + state.tempoPulse * cfg.tempoAmount;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Handle.
+  ctx.strokeStyle = 'rgba(150,156,170,0.8)';
+  ctx.lineWidth = Math.max(3, R * 0.035);
+  ctx.beginPath();
+  ctx.arc(0, -h * 0.5, w * 0.22, Math.PI * 1.12, Math.PI * 1.88);
+  ctx.stroke();
+
+  // Case.
+  const body = ctx.createLinearGradient(0, -h / 2, 0, h / 2);
+  body.addColorStop(0, 'rgba(56,58,68,0.97)');
+  body.addColorStop(1, 'rgba(26,27,34,0.97)');
+  roundRect(-w / 2, -h / 2, w, h, R * 0.07);
+  ctx.fillStyle = body;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.13)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Speakers. Each cone breathes on its own channel, which is the clearest
+  // use of the stereo analysis anywhere in the app. Sized and spaced so the
+  // cones never reach the centre stack — an overlapping woofer hides the
+  // cassette window and swallows half the LED strip.
+  const spR = h * 0.33;
+  for (const [i, lvl] of [[-1, state.levelL], [1, state.levelR]]) {
+    const sx = i * w * 0.34;
+    ctx.beginPath();
+    ctx.arc(sx, 0, spR * 1.12, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(16,16,20,0.95)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    const push = 1 + clamp(lvl * 1.4 + kick * 0.5, 0, 1) * 0.13 * cfg.bbWoofer;
+    const cone = ctx.createRadialGradient(sx - spR * 0.25, -spR * 0.25, spR * 0.1, sx, 0, spR * push);
+    cone.addColorStop(0, 'rgba(92,96,110,0.95)');
+    cone.addColorStop(0.75, 'rgba(38,40,50,0.95)');
+    cone.addColorStop(1, 'rgba(18,18,24,0.95)');
+    ctx.beginPath();
+    ctx.arc(sx, 0, spR * push, 0, Math.PI * 2);
+    ctx.fillStyle = cone;
+    ctx.fill();
+    // Surround and dust cap.
+    ctx.beginPath();
+    ctx.arc(sx, 0, spR * push * 0.82, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.lineWidth = Math.max(2, R * 0.02);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(sx, 0, spR * 0.26 * push, 0, Math.PI * 2);
+    ctx.fillStyle = colorAt(i > 0 ? 0.7 : 0.25, 0.9);
+    ctx.fill();
+  }
+
+  // Centre stack: cassette window over a spectrum LED strip.
+  const cw = w * 0.26, ch = h * 0.32;
+  roundRect(-cw / 2, -h * 0.30, cw, ch, R * 0.02);
+  ctx.fillStyle = 'rgba(10,11,16,0.9)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  const hubR = ch * 0.12, maxPack = ch * 0.30;
+  for (const [i, pack] of [[-1, lerp(maxPack, hubR * 1.1, prog)], [1, lerp(hubR * 1.1, maxPack, prog)]]) {
+    const rx = i * cw * 0.24, ry = -h * 0.30 + ch * 0.5;
+    ctx.beginPath(); ctx.arc(rx, ry, pack, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(58,42,32,0.95)'; ctx.fill();
+    ctx.save(); ctx.translate(rx, ry); ctx.rotate(state.reelAngle);
+    ctx.beginPath(); ctx.arc(0, 0, hubR, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(224,228,238,0.9)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(30,30,38,0.8)'; ctx.lineWidth = 1;
+    for (let k = 0; k < 3; k++) {
+      const a = (k / 3) * Math.PI * 2;
+      ctx.beginPath(); ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(a) * hubR, Math.sin(a) * hubR); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if (cfg.bbLeds) {
+    const n = 14;
+    computeBars(n);
+    const bw = cw / n;
+    const by = h * 0.34, bh = h * 0.20;
+    for (let i = 0; i < n; i++) {
+      const v = bars[i];
+      const segs = 6;
+      for (let sgm = 0; sgm < segs; sgm++) {
+        const on = v > (sgm + 0.5) / segs;
+        const y = by + bh / 2 - (sgm + 1) * (bh / segs);
+        ctx.fillStyle = on
+          ? (sgm > segs - 2 ? 'rgba(255,90,70,0.95)' : colorAt(i / n, 0.95))
+          : 'rgba(255,255,255,0.055)';
+        ctx.fillRect(-cw / 2 + i * bw + bw * 0.16, y, bw * 0.68, bh / segs * 0.62);
+      }
+    }
+  }
+
+  // Knobs and a power lamp.
+  for (const kx of [-w * 0.055, w * 0.055]) {
+    ctx.beginPath();
+    ctx.arc(kx, h * 0.10, R * 0.045, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(120,126,140,0.9)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(-w * 0.44, h * 0.36, R * 0.022, 0, Math.PI * 2);
+  ctx.fillStyle = transport.playing ? colorAt(0.15, 0.95) : 'rgba(120,40,40,0.6)';
+  ctx.fill();
+
+  ctx.restore();
+}
+
 function drawInfo() {
   if (!cfg.showInfo || !state.title) return;
   ctx.save();
@@ -4277,6 +4665,25 @@ function updateSkinMotion(dt) {
   state.discAngle += (Math.PI * 2 / secPerRev()) * spin * dt;
   state.cdAngle   += Math.PI * 2 * 0.5 * cfg.cdSpin * spin * dt;
   state.reelAngle += Math.PI * 2 * 0.55 * cfg.tapeSpin * spin * dt;
+  state.mdAngle   += Math.PI * 2 * 0.55 * cfg.mdSpin * spin * dt;
+
+  // Reel decks pull tape at a constant linear speed, so the reel with less
+  // tape on it turns faster. Angular speed goes as 1/radius.
+  if (cfg.skin === 'reel') {
+    const prog = transport.duration ? clamp(transport.time / transport.duration, 0, 1) : 0;
+    const hub = 0.15, maxPack = 0.52;
+    const pL = Math.max(hub * 1.08, lerp(maxPack, hub * 1.08, prog));
+    const pR = Math.max(hub * 1.08, lerp(hub * 1.08, maxPack, prog));
+    const base = Math.PI * 2 * 0.14 * cfg.tapeSpin * spin * dt;
+    state.reelAngL += base / pL;
+    state.reelAngR += base / pR;
+  }
+
+  // VU ballistics: quick to rise, slow to fall, like a real meter.
+  const vuTarget = l => clamp(l * 2.6, 0, 1.1);
+  const tl = vuTarget(state.levelL), tr = vuTarget(state.levelR);
+  state.vuL += (tl - state.vuL) * (tl > state.vuL ? 1 - Math.exp(-dt / 0.05) : 1 - Math.exp(-dt / 0.32));
+  state.vuR += (tr - state.vuR) * (tr > state.vuR ? 1 - Math.exp(-dt / 0.05) : 1 - Math.exp(-dt / 0.32));
 }
 
 const fmt = s => {
