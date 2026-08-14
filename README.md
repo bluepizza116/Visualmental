@@ -213,28 +213,34 @@ the library and reload with it.
 
 ### Reel-to-reel
 
-An open deck with two reels, a visible tape path and a head block. The tape
-pack moves from the supply reel to the takeup as the track plays, and because a
-reel deck pulls tape at a constant linear speed, **the emptier reel turns
-faster** — angular speed goes as 1/radius, which is what makes it read as a
-real machine rather than two spinning discs.
+An open deck: two reels with a visible tape path threaded past guide rollers,
+a head block, a capstan and pinch roller, a mechanical counter, and VU meters
+with real ballistics reading each channel. Because a reel deck pulls tape at a
+constant linear speed, **the emptier reel turns faster** — angular speed goes
+as 1/radius.
 
-Two VU meters carry the left and right levels with proper ballistics — quick to
-rise, slow to fall. They show the channels separately whether or not Stereo
-split is on. Tape quality drives the same wear DSP as the cassette.
+**Drag either reel to shuttle the tape** — a hand on the flange, exactly like
+scratching the vinyl. The transport buttons under the deck work: play, stop,
+and hold-to-wind ⏪/⏩ that shuttle the actual playhead at 6×, audibly.
 
 ### MiniDisc
 
-A caddy with a sliding metal shutter over a recessed window; the disc spins
-behind it carrying the album art, with an iridescent wash and a clamping hub.
-*Shutter* controls how far it is open.
+A portable player: the disc sits in a bay behind a lid with a circular window,
+over an LCD showing the track title (scrolling when long), queue position,
+time, and the locked BPM. The buttons work — play/pause, **track skip driven
+by the real queue**, stop, and eject, which lifts the lid, pauses, and resumes
+when closed. Drag the disc through the window to jog it.
 
 ### Boombox
 
-Twin woofers that pulse on their own channel — the clearest use of the stereo
-analysis anywhere in the app — over a cassette window with turning reels and a
-spectrum LED strip driven by the real bands. The cones also take a kick from
-the tempo grid, so they move on the beat rather than merely with the volume.
+Twin woofers pulse on their own channel behind ring grilles, kicked by the
+tempo grid so they move on the beat. Between them: a cassette door (click it —
+it pops open), a spectrum LED strip, working transport buttons with
+hold-to-wind, and **three real knobs**. VOL, BASS and TREBLE drive an actual
+tone stack — lowshelf and highshelf filters that sit *before* the analyser, so
+cranking the bass changes the sound, the bars, and how hard the woofers move,
+all at once. The tone stack is scoped to the boombox and eases flat when you
+leave the skin.
 
 ### CD
 

@@ -546,15 +546,19 @@ const DEFAULTS = {
   // localStorage is ignored rather than pinning this off.
   cdSpinArt: true,
   tapeQuality: 0.8, tapeSpin: 1,
-  reelVU: true, mdSpin: 1, mdShutter: 0.72, bbLeds: true, bbWoofer: 1,
+  reelVU: true, mdSpin: 1, bbLeds: true, bbWoofer: 1,
+  bbVol: 0.85, bbBass: 0, bbTreble: 0,
 };
 
 const SKINS = [['none', 'None'], ['vinyl', 'Vinyl turntable'], ['cd', 'CD'],
                ['tape', 'Cassette'], ['reel', 'Reel-to-reel'],
                ['md', 'MiniDisc'], ['boombox', 'Boombox']];
 
-// Skins whose surface is magnetic tape share the wear DSP and the scrubbing engine.
-const TAPE_SKINS = new Set(['tape', 'reel']);
+// Skins whose surface is magnetic tape share the wear DSP; the boombox is a
+// cassette machine, so it belongs here too. SCRUB_SKINS is everything driven
+// by the signed-rate engine so it can be shuttled and dragged.
+const TAPE_SKINS = new Set(['tape', 'reel', 'boombox']);
+const SCRUB_SKINS = new Set(['vinyl', 'tape', 'reel', 'boombox', 'md']);
 
 const SCHEMA = [
   { title: 'Mode', open: true, items: [
@@ -586,13 +590,15 @@ const SCHEMA = [
     { k: 'tapeQuality', t: 'range', label: 'Tape quality', min: 0, max: 1, step: .01, show: c => TAPE_SKINS.has(c.skin) },
     { k: 'tapeSpin',    t: 'range', label: 'Reel speed',   min: 0, max: 3, step: .01, show: c => TAPE_SKINS.has(c.skin) },
     { k: 'reelVU',      t: 'toggle', label: 'VU meters',   show: c => c.skin === 'reel' },
+    { k: '_reelhint', t: 'note', label: 'Drag either reel to shuttle the tape like a hand on the flange; the transport buttons below the deck work too.', show: c => c.skin === 'reel' },
     { k: '_rec',        t: 'record', show: c => TAPE_SKINS.has(c.skin) },
 
-    { k: 'mdSpin',    t: 'range', label: 'Disc speed',  min: 0, max: 3, step: .01, show: c => c.skin === 'md' },
-    { k: 'mdShutter', t: 'range', label: 'Shutter',     min: 0, max: 1, step: .01, show: c => c.skin === 'md' },
+    { k: 'mdSpin',  t: 'range', label: 'Disc speed', min: 0, max: 3, step: .01, show: c => c.skin === 'md' },
+    { k: '_mdhint', t: 'note', label: 'The buttons work: play, track skip, stop, and eject. Drag the disc through the window to jog it.', show: c => c.skin === 'md' },
 
     { k: 'bbLeds',   t: 'toggle', label: 'Spectrum LEDs', show: c => c.skin === 'boombox' },
     { k: 'bbWoofer', t: 'range',  label: 'Woofer travel', min: 0, max: 2, step: .01, show: c => c.skin === 'boombox' },
+    { k: '_bbhint', t: 'note', label: 'The transport buttons work — hold ⏪/⏩ to shuttle. VOL, BASS and TREBLE are real: drag them and the sound (and the woofers) change. Click the door to open it.', show: c => c.skin === 'boombox' },
   ]},
   { title: 'Bars', open: true, show: c => ['bars','radial'].includes(c.mode), items: [
     { k: 'barCount',  t: 'range',  label: 'Count',      min: 12, max: 256, step: 1 },
@@ -705,6 +711,8 @@ const state = {
   playerH: 90,                   // measured height of the transport row
   discAngle: 0, reelAngle: 0, cdAngle: 0, reelAngL: 0, reelAngR: 0, mdAngle: 0,
   vuL: 0, vuR: 0,
+  skinUI: [], uiGrab: null, uiActive: '', shuttle: 0, shuttlePrevPlaying: false,
+  mdLidOpen: false, mdLid: 0, mdWasPlaying: false, bbDoorOpen: false, bbDoor: 0,
   rate: 1,                       // effective playback rate, drives the platter
   grab: null,                    // live scratch gesture
   spinDown: 0,                   // momentum left over from a flick
@@ -721,6 +729,7 @@ const state = {
 
 const audioEl = $('#audio');
 let ctxA = null, analyser = null, monitor = null;
+let inputBus = null, eqBass = null, eqTreble = null, toneVol = null;
 let stereoBus = null, splitter = null, analyserL = null, analyserR = null;
 let tempoAn = null, tempoData = null;
 let elSource = null, streamSource = null, activeStream = null;
@@ -732,7 +741,25 @@ function ensureAudio() {
   ctxA = new (window.AudioContext || window.webkitAudioContext)();
   analyser = ctxA.createAnalyser();
   monitor = ctxA.createGain();
-  analyser.connect(monitor);
+
+  // One entry point for every source, with the boombox tone stack between it
+  // and the analyser: knob changes are then heard AND seen, since the levels
+  // that drive the woofers and bars are read downstream of the filters. The
+  // volume knob sits after the analyser instead, so turning it down does not
+  // flatten the visuals.
+  inputBus = ctxA.createGain();
+  eqBass = ctxA.createBiquadFilter();
+  eqBass.type = 'lowshelf';
+  eqBass.frequency.value = 180;
+  eqTreble = ctxA.createBiquadFilter();
+  eqTreble.type = 'highshelf';
+  eqTreble.frequency.value = 3200;
+  toneVol = ctxA.createGain();
+  inputBus.connect(eqBass);
+  eqBass.connect(eqTreble);
+  eqTreble.connect(analyser);
+  analyser.connect(toneVol);
+  toneVol.connect(monitor);
   monitor.connect(ctxA.destination);
 
   // Per-channel analysis runs off a parallel branch that never reaches the
@@ -750,6 +777,7 @@ function ensureAudio() {
   stereoBus.connect(splitter);
   splitter.connect(analyserL, 0);
   splitter.connect(analyserR, 1);
+  eqTreble.connect(stereoBus);        // per-channel analysis reads post-EQ too
 
   // Onset detection needs the raw spectrum: the main analyser's smoothing is
   // there to steady the visuals, and it smears exactly the transients tempo
@@ -763,6 +791,7 @@ function ensureAudio() {
   stereoBus.connect(tempoAn);
 
   applyAnalyser();
+  applyBoomTone();
   return ctxA;
 }
 
@@ -797,8 +826,7 @@ function useFileSource() {
   disconnectStream();
   if (!elSource) elSource = ctxA.createMediaElementSource(audioEl);
   try { elSource.disconnect(); } catch {}
-  elSource.connect(analyser);
-  elSource.connect(stereoBus);
+  elSource.connect(inputBus);
   monitor.gain.value = 1;             // we want to hear the file
   state.sourceKind = 'file';
   syncSourceUI();
@@ -836,8 +864,7 @@ async function useStreamSource(kind) {
 
   activeStream = stream;
   streamSource = ctxA.createMediaStreamSource(stream);
-  streamSource.connect(analyser);
-  streamSource.connect(stereoBus);
+  streamSource.connect(inputBus);
   monitor.gain.value = 0;             // never route mic/tab back to the speakers
   state.sourceKind = kind;
 
@@ -1075,8 +1102,7 @@ async function startTurntable(seekSeconds = 0, autoplay = true) {
   wowGain.connect(ttNode.parameters.get('rate'));
   flutterGain.connect(ttNode.parameters.get('rate'));
   ttNode.connect(wearChain);
-  wearOut.connect(analyser);
-  wearOut.connect(stereoBus);
+  wearOut.connect(inputBus);
   monitor.gain.value = 1;
 
   ttPos = clamp(seekSeconds * ttBuffer.sampleRate, 0, ttFrames - 1);
@@ -1139,7 +1165,7 @@ function syncTransportUI() {
 
 /** Swap engines when the skin changes, keeping the playhead where it was. */
 async function syncEngine() {
-  const wants = (cfg.skin === 'vinyl' || TAPE_SKINS.has(cfg.skin)) && state.sourceKind === 'file' && !!state.file;
+  const wants = SCRUB_SKINS.has(cfg.skin) && state.sourceKind === 'file' && !!state.file;
   if (wants && !usingTurntable()) {
     const at = audioEl.currentTime || 0, wasPlaying = !audioEl.paused;
     audioEl.pause();
@@ -2866,7 +2892,7 @@ function refreshControls() {
 
 function onChange(key) {
   if (key === '*' || ['fftSize', 'smoothing', 'minDb', 'maxDb'].includes(key)) applyAnalyser();
-  if (key === '*' || key === 'skin') syncEngine();
+  if (key === '*' || key === 'skin') { syncEngine(); applyBoomTone(); }
   if (key === '*' || key === 'uiMode') applyUIMode();
   else if (key === 'vinylCondition' || key === 'tapeQuality') applyWear();
   if (key === '*') refreshControls();
@@ -3699,7 +3725,155 @@ function skinGeom() {
   return { cx: W / 2, cy: H / 2, R: s };
 }
 
+
+/* ---------------- machine controls: hit regions and widgets --------------- */
+/* Each skin registers its live controls every frame in canvas coordinates;
+   the pointer handlers walk the registry. No DOM elements are involved, so
+   the controls scale, dim and record exactly like the rest of the machine. */
+
+const uiRect = (id, x, y, w, h, kind = 'button', extra) =>
+  state.skinUI.push({ id, shape: 'r', x, y, w, h, kind, ...extra });
+const uiCircle = (id, x, y, r, kind = 'button', extra) =>
+  state.skinUI.push({ id, shape: 'c', x, y, r, kind, ...extra });
+
+const uiHit = (u, x, y) => u.shape === 'c'
+  ? Math.hypot(x - u.x, y - u.y) <= u.r
+  : x >= u.x && x <= u.x + u.w && y >= u.y && y <= u.y + u.h;
+
+const KNOB_KEYS = { 'bb-vol': 'bbVol', 'bb-bass': 'bbBass', 'bb-treb': 'bbTreble' };
+
+/* The boombox tone stack is scoped to the boombox: leaving the skin eases the
+   filters flat, so a bass boost does not mysteriously follow you into bars. */
+function applyBoomTone() {
+  if (!eqBass) return;
+  const on = cfg.skin === 'boombox';
+  const t = ctxA.currentTime;
+  eqBass.gain.setTargetAtTime(on ? cfg.bbBass : 0, t, 0.05);
+  eqTreble.gain.setTargetAtTime(on ? cfg.bbTreble : 0, t, 0.05);
+  toneVol.gain.setTargetAtTime(on ? cfg.bbVol : 1, t, 0.05);
+}
+
+/* Hold-to-wind. With the signed-rate engine running this shuttles the actual
+   playhead; otherwise it degrades to a plain seek per press. */
+function startShuttle(dir) {
+  if (!usingTurntable()) { transport.seek(transport.time + dir * 10); return; }
+  state.shuttlePrevPlaying = ttPlaying;
+  ttPlaying = true;
+  ttNode.port.postMessage({ type: 'play' });
+  state.shuttle = dir * 6;
+}
+function endShuttle() {
+  if (!state.shuttle) return;
+  state.shuttle = 0;
+  if (usingTurntable() && !state.shuttlePrevPlaying) {
+    ttPlaying = false;
+    ttNode.port.postMessage({ type: 'pause' });
+  }
+  syncTransportUI();
+}
+
+function startScrubGrab(u, e) {
+  if (!usingTurntable()) {
+    toast(state.sourceKind === 'file' ? 'Loading for scrubbing…' : 'Scrubbing needs a loaded audio file.');
+    return;
+  }
+  state.grab = { a: Math.atan2(e.offsetY - u.y, e.offsetX - u.x), t: performance.now(),
+                 rate: 0, cx: u.x, cy: u.y, perRev: u.perRev || 3 };
+  state.grabWasPlaying = ttPlaying;
+  ttNode.port.postMessage({ type: 'play' });
+  canvas.style.cursor = 'grabbing';
+}
+
+function skinAction(id, phase) {
+  const down = phase === 'down';
+  switch (id) {
+    case 'bb-play': case 'reel-play': case 'md-play':
+      if (down) playPause();
+      break;
+    case 'bb-stop': case 'reel-stop': case 'md-stop':
+      if (down) { transport.pause(); transport.seek(0); syncTransportUI(); }
+      break;
+    case 'bb-ff': case 'reel-ff': down ? startShuttle(1) : endShuttle(); break;
+    case 'bb-rw': case 'reel-rw': down ? startShuttle(-1) : endShuttle(); break;
+    case 'md-next': if (down) stepTrack(1); break;
+    case 'md-prev': if (down) stepTrack(-1); break;
+    case 'bb-door': if (down) state.bbDoorOpen = !state.bbDoorOpen; break;
+    case 'md-eject':
+      if (down) {
+        state.mdLidOpen = !state.mdLidOpen;
+        if (state.mdLidOpen) { state.mdWasPlaying = transport.playing; transport.pause(); }
+        else if (state.mdWasPlaying) transport.play();
+      }
+      break;
+  }
+}
+
+/* A pressable machine button. Registered as it is drawn. */
+function machineButton(id, x, y, w, h, glyph, lit = false) {
+  const press = state.uiActive === id ? 1.5 : 0;
+  ctx.save();
+  roundRect(x, y + press, w, h, Math.min(7, h * 0.24));
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, press ? 'rgba(60,63,76,0.98)' : 'rgba(80,84,98,0.98)');
+  g.addColorStop(1, press ? 'rgba(34,36,46,0.98)' : 'rgba(40,42,54,0.98)');
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = lit ? colorAt(0.2, 0.95) : 'rgba(228,231,240,0.88)';
+  ctx.font = `${Math.max(9, Math.round(h * 0.42))}px ui-sans-serif,system-ui,sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(glyph, x + w / 2, y + h / 2 + press);
+  ctx.restore();
+  uiRect(id, x, y, w, h);
+}
+
+/* A knob with a 270-degree throw. Dragging vertically turns it. */
+function drawKnob(id, x, y, r, val, min, max, label) {
+  const t = clamp((val - min) / (max - min), 0, 1);
+  ctx.save();
+  // tick arc
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 10; i++) {
+    const a = (-225 + 270 * (i / 10)) * Math.PI / 180;
+    ctx.beginPath();
+    ctx.moveTo(x + Math.cos(a) * r * 1.18, y + Math.sin(a) * r * 1.18);
+    ctx.lineTo(x + Math.cos(a) * r * 1.32, y + Math.sin(a) * r * 1.32);
+    ctx.stroke();
+  }
+  const body = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.15, x, y, r);
+  body.addColorStop(0, 'rgba(120,124,138,0.98)');
+  body.addColorStop(1, 'rgba(42,44,56,0.98)');
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = body;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.stroke();
+  const a = (-225 + 270 * t) * Math.PI / 180;
+  ctx.strokeStyle = colorAt(0.25, 0.95);
+  ctx.lineWidth = Math.max(2, r * 0.16);
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x + Math.cos(a) * r * 0.30, y + Math.sin(a) * r * 0.30);
+  ctx.lineTo(x + Math.cos(a) * r * 0.85, y + Math.sin(a) * r * 0.85);
+  ctx.stroke();
+  if (label) {
+    ctx.fillStyle = 'rgba(210,214,226,0.6)';
+    ctx.font = `600 ${Math.max(8, Math.round(r * 0.52))}px ui-sans-serif,system-ui,sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(label, x, y + r * 1.45);
+  }
+  ctx.restore();
+  uiCircle(id, x, y, r * 1.35, 'knob', { min, max });
+}
+
 function drawSkin() {
+  state.skinUI.length = 0;           // rebuilt by whichever skin draws
   if (cfg.skin === 'none') return;
   // Knock the spectrum back so the player reads as the foreground object.
   if (cfg.skinDim > 0) {
@@ -4273,108 +4447,120 @@ function drawReel() {
   const { cx, cy, R } = skinGeom();
   const prog = transport.duration ? clamp(transport.time / transport.duration, 0, 1) : 0;
   const wear = 1 - clamp(cfg.tapeQuality, 0, 1);
-  const hub = R * 0.15, maxPack = R * 0.52;
-  const packL = lerp(maxPack, hub * 1.08, prog);
-  const packR = lerp(hub * 1.08, maxPack, prog);
-  const sep = R * 0.78;
+  const hub = R * 0.13, maxPack = R * 0.46, flange = R * 0.50;
+  const packL = lerp(maxPack, hub * 1.1, prog);
+  const packR = lerp(hub * 1.1, maxPack, prog);
+  const rcy = cy - R * 0.42;
+  const sep = R * 0.60;
 
   ctx.save();
   ctx.translate(cx, cy);
 
-  // Deck plate.
-  const plate = ctx.createLinearGradient(0, -R, 0, R);
-  plate.addColorStop(0, 'rgba(52,50,48,0.95)');
-  plate.addColorStop(1, 'rgba(28,27,26,0.95)');
-  roundRect(-R * 1.28, -R * 0.92, R * 2.56, R * 1.92, R * 0.06);
+  // Deck plate with brushed-metal banding and a darker lower fascia.
+  const plate = ctx.createLinearGradient(0, -R * 1.05, 0, R * 1.1);
+  plate.addColorStop(0, 'rgba(58,56,54,0.97)');
+  plate.addColorStop(0.55, 'rgba(40,39,38,0.97)');
+  plate.addColorStop(1, 'rgba(24,23,22,0.97)');
+  roundRect(-R * 1.35, -R * 1.05, R * 2.7, R * 2.15, R * 0.055);
   ctx.fillStyle = plate;
   ctx.fill();
   ctx.strokeStyle = 'rgba(255,255,255,0.10)';
   ctx.lineWidth = 1.5;
   ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+  for (let y = -R; y < R * 1.05; y += R * 0.09) {
+    ctx.beginPath(); ctx.moveTo(-R * 1.33, y); ctx.lineTo(R * 1.33, y); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(14,14,16,0.65)';
+  roundRect(-R * 1.35, R * 0.48, R * 2.7, R * 0.62, R * 0.055);
+  ctx.fill();
+  // corner screws
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  for (const [sx, sy] of [[-1.27, -0.97], [1.27, -0.97], [-1.27, 1.02], [1.27, 1.02]]) {
+    ctx.beginPath(); ctx.arc(sx * R, sy * R, R * 0.02, 0, 7); ctx.fill();
+  }
 
-  // The tape spans between the two packs, past the head block.
-  ctx.strokeStyle = `rgba(78,56,40,${0.9 - wear * 0.25})`;
-  ctx.lineWidth = Math.max(2, R * 0.028);
+  // Tape path: supply pack -> guide rollers -> heads -> capstan -> takeup pack.
+  const ry = rcy - cy;
+  ctx.strokeStyle = `rgba(80,58,40,${0.92 - wear * 0.25})`;
+  ctx.lineWidth = Math.max(2, R * 0.024);
   ctx.beginPath();
-  ctx.moveTo(-sep, packL);
-  ctx.lineTo(-R * 0.30, R * 0.52);
-  ctx.lineTo(R * 0.30, R * 0.52);
-  ctx.lineTo(sep, packR);
+  ctx.moveTo(-sep, ry + packL);
+  ctx.lineTo(-R * 0.50, R * 0.20);
+  ctx.lineTo(-R * 0.26, R * 0.285);
+  ctx.lineTo(R * 0.26, R * 0.285);
+  ctx.lineTo(R * 0.62, R * 0.30);
+  ctx.lineTo(sep, ry + packR);
   ctx.stroke();
 
-  // Reels. Constant linear speed means the emptier reel turns faster — the
-  // detail that makes a reel deck read as real rather than two spinning discs.
-  for (const [x, pack, ang] of [[-sep, packL, state.reelAngL], [sep, packR, state.reelAngR]]) {
-    ctx.beginPath();
-    ctx.arc(x, 0, pack, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(66,46,32,0.96)';
+  // Guide rollers, capstan and pinch roller.
+  for (const [gx, gy, gr] of [[-0.50, 0.20, 0.045], [0.62, 0.30, 0.032], [0.70, 0.30, 0.052]]) {
+    ctx.beginPath(); ctx.arc(gx * R, gy * R, gr * R, 0, 7);
+    ctx.fillStyle = 'rgba(180,186,200,0.85)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.beginPath(); ctx.arc(gx * R, gy * R, gr * R * 0.35, 0, 7);
+    ctx.fillStyle = 'rgba(30,30,36,0.9)'; ctx.fill();
+  }
+
+  // Head block.
+  roundRect(-R * 0.26, R * 0.22, R * 0.52, R * 0.15, R * 0.015);
+  ctx.fillStyle = 'rgba(34,34,40,0.96)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.stroke();
+  for (let i = -1; i <= 1; i++) {
+    roundRect(i * R * 0.14 - R * 0.04, R * 0.24, R * 0.08, R * 0.10, R * 0.01);
+    ctx.fillStyle = i === 0 ? colorAt(0.4, 0.9) : 'rgba(196,202,214,0.8)';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
+  }
+
+  // Reels. Constant linear tape speed: the emptier reel turns faster.
+  for (const [x, pack, ang, id] of [[-sep, packL, state.reelAngL, 'reel-scrub-l'],
+                                    [sep, packR, state.reelAngR, 'reel-scrub-r']]) {
+    ctx.beginPath(); ctx.arc(x, ry, pack, 0, 7);
+    ctx.fillStyle = 'rgba(66,46,32,0.96)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 1; ctx.stroke();
 
     ctx.save();
-    ctx.translate(x, 0);
+    ctx.translate(x, ry);
     ctx.rotate(ang);
-    // Flange with cut-outs.
-    ctx.beginPath();
-    ctx.arc(0, 0, maxPack * 1.03, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(215,220,232,0.30)';
-    ctx.lineWidth = Math.max(1.5, R * 0.014);
+    ctx.beginPath(); ctx.arc(0, 0, flange, 0, 7);
+    ctx.strokeStyle = 'rgba(220,224,236,0.35)';
+    ctx.lineWidth = Math.max(2, R * 0.02);
     ctx.stroke();
     for (let i = 0; i < 3; i++) {
       const a = (i / 3) * Math.PI * 2;
       ctx.beginPath();
-      ctx.arc(Math.cos(a) * maxPack * 0.72, Math.sin(a) * maxPack * 0.72, maxPack * 0.20, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(20,20,24,0.55)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(215,220,232,0.22)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      ctx.arc(Math.cos(a) * flange * 0.66, Math.sin(a) * flange * 0.66, flange * 0.20, 0, 7);
+      ctx.fillStyle = 'rgba(18,18,22,0.55)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(220,224,236,0.25)'; ctx.lineWidth = 1; ctx.stroke();
     }
-    ctx.beginPath();
-    ctx.arc(0, 0, hub, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(226,229,238,0.92)';
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, hub, 0, 7);
+    ctx.fillStyle = 'rgba(228,231,240,0.94)'; ctx.fill();
     ctx.fillStyle = 'rgba(30,30,36,0.85)';
     for (let i = 0; i < 3; i++) {
-      const a = (i / 3) * Math.PI * 2 + 0.4;
+      const a = (i / 3) * Math.PI * 2 + 0.5;
       ctx.beginPath();
-      ctx.ellipse(Math.cos(a) * hub * 0.5, Math.sin(a) * hub * 0.5, hub * 0.26, hub * 0.16, a, 0, Math.PI * 2);
+      ctx.ellipse(Math.cos(a) * hub * 0.5, Math.sin(a) * hub * 0.5, hub * 0.28, hub * 0.16, a, 0, 7);
       ctx.fill();
     }
     ctx.restore();
+    // A hand on the flange shuttles the tape.
+    uiCircle(id, cx + x, rcy, flange * 1.05, 'scrub', { perRev: 3 });
   }
 
-  // Head block.
-  roundRect(-R * 0.30, R * 0.40, R * 0.60, R * 0.20, R * 0.02);
-  ctx.fillStyle = 'rgba(38,38,44,0.95)';
-  ctx.fill();
-  for (let i = -1; i <= 1; i++) {
-    roundRect(i * R * 0.16 - R * 0.045, R * 0.425, R * 0.09, R * 0.11, R * 0.012);
-    ctx.fillStyle = i === 0 ? colorAt(0.4, 0.85) : 'rgba(190,196,210,0.75)';
-    ctx.fill();
-  }
-
-  // VU meters, driven by the per-channel levels the analyser already produces.
+  // VU meters, reading each channel with real ballistics.
   if (cfg.reelVU) {
-    const mw = R * 0.42, mh = R * 0.30, my = -R * 0.62;
     for (const [i, lvl] of [[-1, state.vuL], [1, state.vuR]]) {
-      const mx = i * R * 0.34;
-      roundRect(mx - mw / 2, my - mh / 2, mw, mh, R * 0.02);
-      ctx.fillStyle = 'rgba(238,230,205,0.92)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      // Scale arc, red past 0VU.
+      const mx = i * R * 0.46, my = R * 0.66, mw = R * 0.52, mh = R * 0.30;
+      roundRect(mx - mw / 2, my - mh / 2, mw, mh, R * 0.015);
+      ctx.fillStyle = 'rgba(238,230,205,0.92)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 1; ctx.stroke();
       const px = mx, py = my + mh * 0.34, rr = mh * 0.72;
       ctx.lineWidth = Math.max(1.5, R * 0.01);
       ctx.beginPath(); ctx.arc(px, py, rr, Math.PI * 1.18, Math.PI * 1.72);
       ctx.strokeStyle = 'rgba(40,36,28,0.75)'; ctx.stroke();
       ctx.beginPath(); ctx.arc(px, py, rr, Math.PI * 1.72, Math.PI * 1.84);
       ctx.strokeStyle = 'rgba(190,40,30,0.85)'; ctx.stroke();
-      // Needle.
       const a = Math.PI * (1.18 + clamp(lvl, 0, 1.1) * 0.66);
       ctx.beginPath();
       ctx.moveTo(px, py);
@@ -4382,250 +4568,333 @@ function drawReel() {
       ctx.strokeStyle = 'rgba(30,26,22,0.9)';
       ctx.lineWidth = Math.max(1.2, R * 0.008);
       ctx.stroke();
-      ctx.beginPath(); ctx.arc(px, py, R * 0.014, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(40,36,30,0.9)'; ctx.fill();
+      ctx.fillStyle = 'rgba(40,36,30,0.9)';
+      ctx.beginPath(); ctx.arc(px, py, R * 0.013, 0, 7); ctx.fill();
     }
   }
 
+  // Mechanical counter between the meters.
+  roundRect(-R * 0.15, R * 0.575, R * 0.30, R * 0.17, R * 0.012);
+  ctx.fillStyle = 'rgba(8,8,10,0.95)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.fillStyle = 'rgba(235,238,246,0.9)';
+  ctx.font = `600 ${Math.max(9, R * 0.085)}px ui-monospace,monospace`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(fmt(transport.time), 0, R * 0.662);
+  ctx.textAlign = 'left';
+
   ctx.restore();
+
+  // Transport — drawn after the restore, since the buttons take canvas
+  // coordinates so their hit regions and their pixels agree.
+  const bw = R * 0.24, bh = R * 0.17, gap = R * 0.035;
+  const total = 4 * bw + 3 * gap;
+  const bx0 = -total / 2, by = R * 0.90;
+  machineButton('reel-rw',   cx + bx0,                  cy + by, bw, bh, '⏪\uFE0E');
+  machineButton('reel-play', cx + bx0 + (bw + gap),     cy + by, bw, bh, transport.playing ? '❚❚' : '▶', transport.playing);
+  machineButton('reel-stop', cx + bx0 + 2 * (bw + gap), cy + by, bw, bh, '■');
+  machineButton('reel-ff',   cx + bx0 + 3 * (bw + gap), cy + by, bw, bh, '⏩\uFE0E');
+
   if (wear > 0.05) drawFuzz(wear * 0.3);
 }
 
-/* ---- minidisc ------------------------------------------------------------ */
+/* ---- minidisc: a portable player unit ------------------------------------ */
 
 function drawMiniDisc() {
   const { cx, cy, R } = skinGeom();
-  const w = R * 1.62, h = R * 1.54;
-  const open = clamp(cfg.mdShutter, 0, 1);
+  const w = R * 1.95, h = R * 1.5;
+  const lid = state.mdLid;
+  const discY = -h * 0.235, discR = R * 0.35;
 
   ctx.save();
   ctx.translate(cx, cy);
 
-  // Caddy.
+  // Body.
   const body = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
-  body.addColorStop(0, 'rgba(46,48,58,0.96)');
-  body.addColorStop(1, 'rgba(22,23,30,0.96)');
-  roundRect(-w / 2, -h / 2, w, h, R * 0.09);
+  body.addColorStop(0, 'rgba(58,62,74,0.97)');
+  body.addColorStop(1, 'rgba(26,28,38,0.97)');
+  roundRect(-w / 2, -h / 2, w, h, R * 0.12);
   ctx.fillStyle = body;
   ctx.fill();
   ctx.strokeStyle = 'rgba(255,255,255,0.16)';
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  // The window is a recess in the caddy; the disc is only ever seen through
-  // the part of it the shutter has uncovered.
-  const winW = w * 0.80, winH = h * 0.56, winY = -h * 0.11;
-  const winX = -winW / 2;
-  roundRect(winX, winY - winH / 2, winW, winH, R * 0.03);
-  ctx.fillStyle = 'rgba(9,10,15,0.95)';
-  ctx.fill();
+  // Disc bay (drawn before the lid so opening reveals it).
+  ctx.beginPath(); ctx.arc(0, discY, discR * 1.08, 0, 7);
+  ctx.fillStyle = 'rgba(8,9,14,0.95)'; ctx.fill();
 
-  const openW = winW * open;
-  if (openW > 2) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(winX, winY - winH / 2, openW, winH);
-    ctx.clip();
-
-    const discR = winH * 0.46;
-    ctx.save();
-    ctx.translate(0, winY);
-    ctx.rotate(state.mdAngle);
-    ctx.beginPath();
-    ctx.arc(0, 0, discR, 0, Math.PI * 2);
-    if (cfg.cdArt && state.cover) {
-      ctx.save(); ctx.clip();
-      const img = state.cover;
-      const sc = Math.max((discR * 2) / img.width, (discR * 2) / img.height);
-      ctx.drawImage(img, -img.width * sc / 2, -img.height * sc / 2, img.width * sc, img.height * sc);
-      ctx.restore();
-    } else {
-      const g = ctx.createRadialGradient(0, 0, discR * 0.15, 0, 0, discR);
-      g.addColorStop(0, colorAt(0.2, 1));
-      g.addColorStop(1, colorAt(0.8, 1));
-      ctx.fillStyle = g;
-      ctx.fill();
-    }
-    // Iridescent wash so it reads as a disc rather than a printed circle.
-    const sheen = ctx.createLinearGradient(-discR, -discR, discR, discR);
-    for (let i = 0; i <= 5; i++) {
-      const [r, g2, b] = hsl2rgb((i / 5 + state.t * 0.06) % 1, 0.9, 0.55);
-      sheen.addColorStop(i / 5, `rgba(${r|0},${g2|0},${b|0},${(0.13 * Math.sin((i / 5) * Math.PI)).toFixed(3)})`);
-    }
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.beginPath(); ctx.arc(0, 0, discR, 0, Math.PI * 2);
-    ctx.fillStyle = sheen; ctx.fill();
-    ctx.globalCompositeOperation = 'source-over';
-    // Clamping hub.
-    ctx.beginPath(); ctx.arc(0, 0, discR * 0.22, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(190,196,210,0.9)'; ctx.fill();
-    ctx.beginPath(); ctx.arc(0, 0, discR * 0.10, 0, Math.PI * 2);
-    ctx.fillStyle = '#0b0b10'; ctx.fill();
-    ctx.restore();
-    ctx.restore();
-  }
-
-  // Metal shutter covering whatever is left of the window.
-  if (openW < winW - 1) {
-    roundRect(winX + openW, winY - winH / 2, winW - openW, winH, R * 0.02);
-    const sh = ctx.createLinearGradient(0, winY - winH / 2, 0, winY + winH / 2);
-    sh.addColorStop(0, 'rgba(184,190,204,0.97)');
-    sh.addColorStop(0.5, 'rgba(126,132,146,0.97)');
-    sh.addColorStop(1, 'rgba(164,170,184,0.97)');
-    ctx.fillStyle = sh;
-    ctx.fill();
-  }
-  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-  ctx.lineWidth = 1;
-  roundRect(winX, winY - winH / 2, winW, winH, R * 0.03);
-  ctx.stroke();
-
-  // Paper label across the bottom — opaque, or the disc shows through it.
-  const lw = w * 0.86, lh = h * 0.19, ly = h * 0.5 - lh - h * 0.055;
-  roundRect(-lw / 2, ly, lw, lh, R * 0.015);
-  const lab = ctx.createLinearGradient(-lw / 2, 0, lw / 2, 0);
-  lab.addColorStop(0, colorAt(0.2, 1));
-  lab.addColorStop(1, colorAt(0.7, 1));
-  ctx.fillStyle = lab;
-  ctx.fill();
+  // The disc itself.
   ctx.save();
-  ctx.beginPath();
-  ctx.rect(-lw / 2, ly, lw, lh);
-  ctx.clip();
-  ctx.fillStyle = 'rgba(8,8,12,0.88)';
-  ctx.font = `600 ${Math.max(9, R * 0.072)}px ui-sans-serif,system-ui,sans-serif`;
+  ctx.translate(0, discY);
+  ctx.rotate(state.mdAngle);
+  ctx.beginPath(); ctx.arc(0, 0, discR, 0, 7);
+  if (state.cover) {
+    ctx.save(); ctx.clip();
+    const img = state.cover;
+    const sc = Math.max((discR * 2) / img.width, (discR * 2) / img.height);
+    ctx.drawImage(img, -img.width * sc / 2, -img.height * sc / 2, img.width * sc, img.height * sc);
+    ctx.restore();
+  } else {
+    const g = ctx.createRadialGradient(0, 0, discR * 0.15, 0, 0, discR);
+    g.addColorStop(0, colorAt(0.2, 1));
+    g.addColorStop(1, colorAt(0.8, 1));
+    ctx.fillStyle = g; ctx.fill();
+  }
+  const sheen = ctx.createLinearGradient(-discR, -discR, discR, discR);
+  for (let i = 0; i <= 5; i++) {
+    const [r2, g2, b2] = hsl2rgb((i / 5 + state.t * 0.06) % 1, 0.9, 0.55);
+    sheen.addColorStop(i / 5, `rgba(${r2|0},${g2|0},${b2|0},${(0.13 * Math.sin((i / 5) * Math.PI)).toFixed(3)})`);
+  }
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.beginPath(); ctx.arc(0, 0, discR, 0, 7);
+  ctx.fillStyle = sheen; ctx.fill();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.beginPath(); ctx.arc(0, 0, discR * 0.20, 0, 7);
+  ctx.fillStyle = 'rgba(196,202,214,0.92)'; ctx.fill();
+  ctx.beginPath(); ctx.arc(0, 0, discR * 0.09, 0, 7);
+  ctx.fillStyle = '#0b0b10'; ctx.fill();
+  ctx.restore();
+
+  // Lid: a plate with a circular window, hinged at the top edge. Opening
+  // shrinks it toward the hinge, uncovering the whole bay.
+  const lidH = h * 0.52, lidTop = -h / 2 + h * 0.035, lidW = w * 0.93;
+  if (lid < 0.98) {
+    ctx.save();
+    ctx.translate(0, lidTop);
+    ctx.scale(1, 1 - 0.92 * lid);
+    ctx.translate(0, -lidTop);
+    ctx.beginPath();
+    roundRect(-lidW / 2, lidTop, lidW, lidH, R * 0.08);
+    ctx.moveTo(discR * 0.82, discY);
+    ctx.arc(0, discY, discR * 0.82, 0, Math.PI * 2, true);
+    const lg = ctx.createLinearGradient(-lidW / 2, 0, lidW / 2, 0);
+    lg.addColorStop(0, `rgba(74,80,96,${0.97 - lid * 0.4})`);
+    lg.addColorStop(1, `rgba(44,48,62,${0.97 - lid * 0.4})`);
+    ctx.fillStyle = lg;
+    ctx.fill('evenodd');
+    ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+    ctx.lineWidth = 1;
+    roundRect(-lidW / 2, lidTop, lidW, lidH, R * 0.08);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, discY, discR * 0.82, 0, 7);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(220,224,236,0.5)';
+    ctx.font = `600 ${Math.max(8, R * 0.06)}px ui-sans-serif,system-ui,sans-serif`;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText('PRISM MD', -lidW / 2 + R * 0.07, lidTop + R * 0.05);
+    ctx.restore();
+  }
+  // Dragging the visible disc jogs it.
+  uiCircle('md-scrub', cx, cy + discY, discR, 'scrub', { perRev: 2 });
+
+  // LCD.
+  const lw = w * 0.86, lh = h * 0.155, ly = h * 0.065;
+  roundRect(-lw / 2, ly, lw, lh, R * 0.02);
+  ctx.fillStyle = 'rgba(6,12,10,0.96)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.save();
+  ctx.beginPath(); ctx.rect(-lw / 2 + 3, ly + 2, lw - 6, lh - 4); ctx.clip();
+  const lcdCol = colorAt(0.3, 0.9);
+  ctx.fillStyle = lcdCol;
+  ctx.font = `600 ${Math.max(9, R * 0.075)}px ui-monospace,monospace`;
   ctx.textBaseline = 'middle';
-  ctx.fillText(state.title || 'Untitled', -lw / 2 + R * 0.05, ly + lh / 2);
+  const title = state.title || 'NO DISC';
+  const tw = ctx.measureText(title).width;
+  const scrollW = lw * 0.52;
+  let tx = -lw / 2 + R * 0.05;
+  if (tw > scrollW) tx -= (state.t * 26) % (tw + 60);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(-lw / 2 + 3, ly + 2, scrollW, lh - 4); ctx.clip();
+  ctx.fillText(title, tx, ly + lh / 2);
+  if (tw > scrollW) ctx.fillText(title, tx + tw + 60, ly + lh / 2);
+  ctx.restore();
+  ctx.textAlign = 'right';
+  const trk = queue.pos >= 0 ? `T${queue.pos + 1}` : '--';
+  const bpm = state.bpm && state.bpmConf >= 0.12 ? ` ${Math.round(state.bpm)}♩` : '';
+  ctx.fillText(`${trk} ${fmt(transport.time)}${bpm}`, lw / 2 - R * 0.05, ly + lh / 2);
+  ctx.textAlign = 'left';
   ctx.restore();
 
   ctx.restore();
+
+  // Transport row, in canvas coordinates so pixels and hit regions agree.
+  const bw = w * 0.145, bh = h * 0.15, gap = w * 0.026;
+  const total = 5 * bw + 4 * gap;
+  const bx0 = -total / 2, by = h * 0.28;
+  machineButton('md-prev',  cx + bx0,                  cy + by, bw, bh, '⏮\uFE0E');
+  machineButton('md-play',  cx + bx0 + (bw + gap),     cy + by, bw, bh, transport.playing ? '❚❚' : '▶', transport.playing);
+  machineButton('md-next',  cx + bx0 + 2 * (bw + gap), cy + by, bw, bh, '⏭\uFE0E');
+  machineButton('md-stop',  cx + bx0 + 3 * (bw + gap), cy + by, bw, bh, '■');
+  machineButton('md-eject', cx + bx0 + 4 * (bw + gap), cy + by, bw, bh, '⏏\uFE0E', state.mdLidOpen);
 }
 
 /* ---- boombox ------------------------------------------------------------- */
 
 function drawBoombox() {
   const { cx, cy, R } = skinGeom();
-  const w = R * 2.5, h = R * 1.5;
+  const w = R * 2.85, h = R * 1.78;
   const prog = transport.duration ? clamp(transport.time / transport.duration, 0, 1) : 0;
   const kick = state.bass + state.tempoPulse * cfg.tempoAmount;
+  const wear = 1 - clamp(cfg.tapeQuality, 0, 1);
 
   ctx.save();
   ctx.translate(cx, cy);
 
   // Handle.
-  ctx.strokeStyle = 'rgba(150,156,170,0.8)';
-  ctx.lineWidth = Math.max(3, R * 0.035);
+  ctx.strokeStyle = 'rgba(158,164,178,0.85)';
+  ctx.lineWidth = Math.max(3, R * 0.038);
   ctx.beginPath();
-  ctx.arc(0, -h * 0.5, w * 0.22, Math.PI * 1.12, Math.PI * 1.88);
+  ctx.arc(0, -h * 0.5, w * 0.20, Math.PI * 1.10, Math.PI * 1.90);
   ctx.stroke();
 
-  // Case.
+  // Case with a chrome top strip.
   const body = ctx.createLinearGradient(0, -h / 2, 0, h / 2);
-  body.addColorStop(0, 'rgba(56,58,68,0.97)');
-  body.addColorStop(1, 'rgba(26,27,34,0.97)');
+  body.addColorStop(0, 'rgba(58,60,72,0.97)');
+  body.addColorStop(1, 'rgba(24,25,32,0.97)');
   roundRect(-w / 2, -h / 2, w, h, R * 0.07);
   ctx.fillStyle = body;
   ctx.fill();
   ctx.strokeStyle = 'rgba(255,255,255,0.13)';
   ctx.lineWidth = 1.5;
   ctx.stroke();
-
-  // Speakers. Each cone breathes on its own channel, which is the clearest
-  // use of the stereo analysis anywhere in the app. Sized and spaced so the
-  // cones never reach the centre stack — an overlapping woofer hides the
-  // cassette window and swallows half the LED strip.
-  const spR = h * 0.33;
-  for (const [i, lvl] of [[-1, state.levelL], [1, state.levelR]]) {
-    const sx = i * w * 0.34;
+  ctx.save();
+  ctx.beginPath();
+  roundRect(-w / 2, -h / 2, w, h * 0.085, R * 0.07);
+  ctx.clip();
+  const chrome = ctx.createLinearGradient(0, -h / 2, 0, -h / 2 + h * 0.085);
+  chrome.addColorStop(0, 'rgba(200,206,220,0.5)');
+  chrome.addColorStop(1, 'rgba(90,95,110,0.4)');
+  ctx.fillStyle = chrome;
+  ctx.fillRect(-w / 2, -h / 2, w, h * 0.085);
+  ctx.restore();
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
     ctx.beginPath();
-    ctx.arc(sx, 0, spR * 1.12, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(16,16,20,0.95)';
+    ctx.arc(sx * (w / 2 - R * 0.07), sy * (h / 2 - R * 0.07), R * 0.02, 0, 7);
     ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
+  }
 
+  // Speakers: chrome ring, ring grille, cone per channel, beat-kicked.
+  const spR = h * 0.30;
+  for (const [i, lvl] of [[-1, state.levelL], [1, state.levelR]]) {
+    const sx = i * w * 0.315;
+    ctx.beginPath(); ctx.arc(sx, h * 0.03, spR * 1.16, 0, 7);
+    ctx.fillStyle = 'rgba(14,14,18,0.95)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(190,196,210,0.4)';
+    ctx.lineWidth = Math.max(2, R * 0.02);
+    ctx.stroke();
+    // grille rings
+    ctx.lineWidth = 1;
+    for (let g = spR * 1.02; g > spR * 0.4; g -= spR * 0.13) {
+      ctx.beginPath(); ctx.arc(sx, h * 0.03, g, 0, 7);
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.stroke();
+    }
     const push = 1 + clamp(lvl * 1.4 + kick * 0.5, 0, 1) * 0.13 * cfg.bbWoofer;
-    const cone = ctx.createRadialGradient(sx - spR * 0.25, -spR * 0.25, spR * 0.1, sx, 0, spR * push);
-    cone.addColorStop(0, 'rgba(92,96,110,0.95)');
+    const cone = ctx.createRadialGradient(sx - spR * 0.25, h * 0.03 - spR * 0.25, spR * 0.1, sx, h * 0.03, spR * push);
+    cone.addColorStop(0, 'rgba(96,100,114,0.95)');
     cone.addColorStop(0.75, 'rgba(38,40,50,0.95)');
     cone.addColorStop(1, 'rgba(18,18,24,0.95)');
-    ctx.beginPath();
-    ctx.arc(sx, 0, spR * push, 0, Math.PI * 2);
-    ctx.fillStyle = cone;
-    ctx.fill();
-    // Surround and dust cap.
-    ctx.beginPath();
-    ctx.arc(sx, 0, spR * push * 0.82, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(sx, h * 0.03, spR * push, 0, 7);
+    ctx.fillStyle = cone; ctx.fill();
+    ctx.beginPath(); ctx.arc(sx, h * 0.03, spR * push * 0.82, 0, 7);
     ctx.strokeStyle = 'rgba(0,0,0,0.4)';
     ctx.lineWidth = Math.max(2, R * 0.02);
     ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(sx, 0, spR * 0.26 * push, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(sx, h * 0.03, spR * 0.26 * push, 0, 7);
     ctx.fillStyle = colorAt(i > 0 ? 0.7 : 0.25, 0.9);
     ctx.fill();
   }
 
-  // Centre stack: cassette window over a spectrum LED strip.
-  const cw = w * 0.26, ch = h * 0.32;
-  roundRect(-cw / 2, -h * 0.30, cw, ch, R * 0.02);
-  ctx.fillStyle = 'rgba(10,11,16,0.9)';
+  // Cassette door. Click to pop it open.
+  const dw = w * 0.235, dh = h * 0.26, dx = -dw / 2, dy = -h * 0.425;
+  roundRect(dx - 3, dy - 3, dw + 6, dh + 6, R * 0.02);
+  ctx.fillStyle = 'rgba(10,11,16,0.92)';
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-  const hubR = ch * 0.12, maxPack = ch * 0.30;
-  for (const [i, pack] of [[-1, lerp(maxPack, hubR * 1.1, prog)], [1, lerp(hubR * 1.1, maxPack, prog)]]) {
-    const rx = i * cw * 0.24, ry = -h * 0.30 + ch * 0.5;
-    ctx.beginPath(); ctx.arc(rx, ry, pack, 0, Math.PI * 2);
+  // cassette inside
+  const hubR = dh * 0.16, maxPack = dh * 0.30;
+  roundRect(dx + dw * 0.06, dy + dh * 0.10, dw * 0.88, dh * 0.80, R * 0.015);
+  ctx.fillStyle = 'rgba(46,48,58,0.95)';
+  ctx.fill();
+  for (const [k, pack] of [[-1, lerp(maxPack, hubR * 1.1, prog)], [1, lerp(hubR * 1.1, maxPack, prog)]]) {
+    const rx = k * dw * 0.22, rry = dy + dh * 0.5;
+    ctx.beginPath(); ctx.arc(rx, rry, pack, 0, 7);
     ctx.fillStyle = 'rgba(58,42,32,0.95)'; ctx.fill();
-    ctx.save(); ctx.translate(rx, ry); ctx.rotate(state.reelAngle);
-    ctx.beginPath(); ctx.arc(0, 0, hubR, 0, Math.PI * 2);
+    ctx.save(); ctx.translate(rx, rry); ctx.rotate(state.reelAngle);
+    ctx.beginPath(); ctx.arc(0, 0, hubR, 0, 7);
     ctx.fillStyle = 'rgba(224,228,238,0.9)'; ctx.fill();
     ctx.strokeStyle = 'rgba(30,30,38,0.8)'; ctx.lineWidth = 1;
-    for (let k = 0; k < 3; k++) {
-      const a = (k / 3) * Math.PI * 2;
-      ctx.beginPath(); ctx.moveTo(0, 0);
-      ctx.lineTo(Math.cos(a) * hubR, Math.sin(a) * hubR); ctx.stroke();
+    for (let t2 = 0; t2 < 3; t2++) {
+      const a = (t2 / 3) * Math.PI * 2;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * hubR, Math.sin(a) * hubR); ctx.stroke();
     }
     ctx.restore();
   }
+  // smoked door glass, hinged at the bottom, opening outward
+  if (state.bbDoor < 0.97) {
+    ctx.save();
+    ctx.translate(0, dy + dh);
+    ctx.scale(1, 1 - 0.9 * state.bbDoor);
+    ctx.translate(0, -(dy + dh));
+    roundRect(dx, dy, dw, dh, R * 0.02);
+    ctx.fillStyle = `rgba(120,130,150,${0.22 - state.bbDoor * 0.1})`;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+  }
+  uiRect('bb-door', cx + dx, cy + dy, dw, dh);
 
+  // Spectrum LEDs.
   if (cfg.bbLeds) {
-    const n = 14;
+    const n = 12;
     computeBars(n);
-    const bw = cw / n;
-    const by = h * 0.34, bh = h * 0.20;
+    const cw2 = w * 0.235, bw2 = cw2 / n, by2 = -h * 0.115, bh2 = h * 0.105;
     for (let i = 0; i < n; i++) {
       const v = bars[i];
-      const segs = 6;
-      for (let sgm = 0; sgm < segs; sgm++) {
-        const on = v > (sgm + 0.5) / segs;
-        const y = by + bh / 2 - (sgm + 1) * (bh / segs);
+      const segs = 5;
+      for (let sg = 0; sg < segs; sg++) {
+        const on = v > (sg + 0.5) / segs;
+        const y = by2 + bh2 - (sg + 1) * (bh2 / segs);
         ctx.fillStyle = on
-          ? (sgm > segs - 2 ? 'rgba(255,90,70,0.95)' : colorAt(i / n, 0.95))
-          : 'rgba(255,255,255,0.055)';
-        ctx.fillRect(-cw / 2 + i * bw + bw * 0.16, y, bw * 0.68, bh / segs * 0.62);
+          ? (sg === segs - 1 ? 'rgba(255,90,70,0.95)' : colorAt(i / n, 0.95))
+          : 'rgba(255,255,255,0.05)';
+        ctx.fillRect(-cw2 / 2 + i * bw2 + bw2 * 0.18, y, bw2 * 0.64, bh2 / segs * 0.6);
       }
     }
   }
 
-  // Knobs and a power lamp.
-  for (const kx of [-w * 0.055, w * 0.055]) {
-    ctx.beginPath();
-    ctx.arc(kx, h * 0.10, R * 0.045, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(120,126,140,0.9)';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  }
+  // Power lamp and badge.
   ctx.beginPath();
-  ctx.arc(-w * 0.44, h * 0.36, R * 0.022, 0, Math.PI * 2);
+  ctx.arc(-w * 0.44, -h * 0.40, R * 0.02, 0, 7);
   ctx.fillStyle = transport.playing ? colorAt(0.15, 0.95) : 'rgba(120,40,40,0.6)';
   ctx.fill();
+  ctx.fillStyle = 'rgba(210,214,226,0.5)';
+  ctx.font = `700 ${Math.max(8, R * 0.055)}px ui-sans-serif,system-ui,sans-serif`;
+  ctx.textAlign = 'right';
+  ctx.fillText('PRISM STEREO', w * 0.455, -h * 0.40);
+  ctx.textAlign = 'left';
 
   ctx.restore();
+
+  // Transport and knobs in canvas coordinates, so pixels and hit regions agree.
+  const bw = R * 0.155, bh = R * 0.155, gap = R * 0.02;
+  const total = 4 * bw + 3 * gap;
+  const bx0 = -total / 2, by = h * 0.075;
+  machineButton('bb-rw',   cx + bx0,                  cy + by, bw, bh, '⏪\uFE0E');
+  machineButton('bb-play', cx + bx0 + (bw + gap),     cy + by, bw, bh, transport.playing ? '❚❚' : '▶', transport.playing);
+  machineButton('bb-stop', cx + bx0 + 2 * (bw + gap), cy + by, bw, bh, '■');
+  machineButton('bb-ff',   cx + bx0 + 3 * (bw + gap), cy + by, bw, bh, '⏩\uFE0E');
+
+  // The knobs are real: volume, bass and treble drive the tone stack.
+  const ky = h * 0.30, kr = R * 0.068;
+  drawKnob('bb-vol',  cx - R * 0.24, cy + ky, kr, cfg.bbVol, 0, 1, 'VOL');
+  drawKnob('bb-bass', cx,            cy + ky, kr, cfg.bbBass, -12, 12, 'BASS');
+  drawKnob('bb-treb', cx + R * 0.24, cy + ky, kr, cfg.bbTreble, -12, 12, 'TREB');
+
+  if (wear > 0.05) drawFuzz(wear * 0.25);
 }
 
 function drawInfo() {
@@ -4690,10 +4959,10 @@ function frame(now) {
 
 /** Platter/reel motion, and the scratch physics that drives playback rate. */
 function updateSkinMotion(dt) {
-  const target = state.grab ? state.grab.rate : (transport.playing ? 1 : 0);
+  const target = state.grab ? state.grab.rate : state.shuttle ? state.shuttle : (transport.playing ? 1 : 0);
   // Snappy while a hand is on the record; a slow settle afterwards is what
   // turns a flick into coasting momentum.
-  const tau = state.grab ? 0.03 : 0.22;
+  const tau = state.grab ? 0.03 : state.shuttle ? 0.1 : 0.22;
   state.rate = lerp(state.rate, target, 1 - Math.exp(-dt / Math.max(0.001, tau)));
   if (Math.abs(state.rate - target) < 0.002) state.rate = target;
   if (usingTurntable()) setTurntableRate(state.rate);
@@ -4721,6 +4990,10 @@ function updateSkinMotion(dt) {
   const tl = vuTarget(state.levelL), tr = vuTarget(state.levelR);
   state.vuL += (tl - state.vuL) * (tl > state.vuL ? 1 - Math.exp(-dt / 0.05) : 1 - Math.exp(-dt / 0.32));
   state.vuR += (tr - state.vuR) * (tr > state.vuR ? 1 - Math.exp(-dt / 0.05) : 1 - Math.exp(-dt / 0.32));
+
+  // Lid and door mechanisms ease toward their target.
+  state.mdLid += ((state.mdLidOpen ? 1 : 0) - state.mdLid) * (1 - Math.exp(-dt / 0.16));
+  state.bbDoor += ((state.bbDoorOpen ? 1 : 0) - state.bbDoor) * (1 - Math.exp(-dt / 0.16));
 }
 
 const fmt = s => {
@@ -4820,6 +5093,24 @@ canvas.addEventListener('pointerdown', e => {
       return;
     }
   }
+
+  // Machine controls registered by the active skin.
+  for (let i = state.skinUI.length - 1; i >= 0; i--) {
+    const u = state.skinUI[i];
+    if (!uiHit(u, e.offsetX, e.offsetY)) continue;
+    canvas.setPointerCapture(e.pointerId);
+    if (u.kind === 'knob') {
+      state.uiGrab = { id: u.id, startY: e.offsetY, startVal: cfg[KNOB_KEYS[u.id]] || 0,
+                       min: u.min, max: u.max };
+    } else if (u.kind === 'scrub') {
+      startScrubGrab(u, e);
+    } else {
+      state.uiActive = u.id;
+      skinAction(u.id, 'down');
+    }
+    return;
+  }
+
   if (!overRecord(e.offsetX, e.offsetY)) return;
   if (!usingTurntable()) {
     toast(state.sourceKind === 'file'
@@ -4829,7 +5120,8 @@ canvas.addEventListener('pointerdown', e => {
   }
   const { cx, cy } = skinGeom();
   canvas.setPointerCapture(e.pointerId);
-  state.grab = { a: Math.atan2(e.offsetY - cy, e.offsetX - cx), t: performance.now(), rate: 0 };
+  state.grab = { a: Math.atan2(e.offsetY - cy, e.offsetX - cx), t: performance.now(), rate: 0,
+                 cx, cy, perRev: secPerRev() };
   state.grabWasPlaying = ttPlaying;
   // A stopped record can still be scratched, so drive the worklet regardless.
   ttNode.port.postMessage({ type: 'play' });
@@ -4837,11 +5129,30 @@ canvas.addEventListener('pointerdown', e => {
 });
 
 canvas.addEventListener('pointermove', e => {
-  if (!state.grab) {
-    canvas.style.cursor = overRecord(e.offsetX, e.offsetY) ? 'grab' : '';
+  if (state.uiGrab) {
+    const u = state.uiGrab;
+    const key = KNOB_KEYS[u.id];
+    if (key) {
+      cfg[key] = clamp(u.startVal + (u.startY - e.offsetY) / 140 * (u.max - u.min), u.min, u.max);
+      applyBoomTone();
+      saveConfig();
+    }
     return;
   }
-  const { cx, cy } = skinGeom();
+  if (!state.grab) {
+    let cur = overRecord(e.offsetX, e.offsetY) ? 'grab' : '';
+    if (!cur) {
+      for (let i = state.skinUI.length - 1; i >= 0; i--) {
+        if (uiHit(state.skinUI[i], e.offsetX, e.offsetY)) {
+          cur = state.skinUI[i].kind === 'scrub' ? 'grab' : 'pointer';
+          break;
+        }
+      }
+    }
+    canvas.style.cursor = cur;
+    return;
+  }
+  const cx = state.grab.cx, cy = state.grab.cy;
   const a = Math.atan2(e.offsetY - cy, e.offsetX - cx);
   const now = performance.now();
   let da = a - state.grab.a;
@@ -4849,12 +5160,23 @@ canvas.addEventListener('pointermove', e => {
   while (da < -Math.PI) da += Math.PI * 2;
   const dt = Math.max(0.008, (now - state.grab.t) / 1000);
   const omega = da / dt;                            // rad/s under the finger
-  state.grab.rate = clamp(omega * secPerRev() / (Math.PI * 2), -8, 8);
+  state.grab.rate = clamp(omega * state.grab.perRev / (Math.PI * 2), -8, 8);
   state.grab.a = a;
   state.grab.t = now;
 });
 
 const endGrab = e => {
+  if (state.uiGrab) {
+    state.uiGrab = null;
+    try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    return;
+  }
+  if (state.uiActive) {
+    skinAction(state.uiActive, 'up');
+    state.uiActive = '';
+    try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    return;
+  }
   if (!state.grab) return;
   // A stale pointer means the finger stopped moving before lifting: no flick.
   if (performance.now() - state.grab.t > 90) state.grab.rate = 0;
@@ -4880,7 +5202,7 @@ canvas.addEventListener('pointerup', e => {
   const moved = Math.hypot(e.offsetX - tapPt.x, e.offsetY - tapPt.y);
   const quick = performance.now() - tapStart < 350;
   tapPt = null;
-  if (!quick || moved > 12 || state.grab) return;
+  if (!quick || moved > 12 || state.grab || state.uiActive || state.uiGrab) return;
   if (overRecord(e.offsetX, e.offsetY)) return;      // that was a scratch
   document.body.classList.toggle('hideui');
 });
