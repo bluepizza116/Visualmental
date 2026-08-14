@@ -1540,6 +1540,18 @@ function colorAt(t, alpha = 1) {
   return `rgba(${c[0]},${c[1]},${c[2]},${alpha})`;
 }
 
+/* A material tinted by the palette: hue comes from the profile, while the
+   saturation and lightness stay in the role the material needs (dark tape,
+   pale meter face). The tint is capped by the source's own saturation so a
+   greyscale cover yields neutral grey materials — forcing chroma onto an
+   achromatic hue would paint everything red, since grey reports hue 0. */
+function materialTint(t, sat, light, alpha = 1) {
+  const c = colorRGB(t);
+  const [h, srcS] = rgb2hsl(c[0], c[1], c[2]);
+  const [r, g, b] = hsl2rgb(h, Math.min(sat, sat * clamp(srcS * 3, 0, 1)), light);
+  return `rgba(${r | 0},${g | 0},${b | 0},${alpha})`;
+}
+
 /* Pre-rendered glow sprites. Canvas shadowBlur is per-draw-call expensive and
    pathological under a 'lighter' composite — a few hundred shadowed circles
    per frame cost seconds, not milliseconds. Stamping a cached radial-gradient
@@ -4482,7 +4494,7 @@ function drawReel() {
 
   // Tape path: supply pack -> guide rollers -> heads -> capstan -> takeup pack.
   const ry = rcy - cy;
-  ctx.strokeStyle = `rgba(80,58,40,${0.92 - wear * 0.25})`;
+  ctx.strokeStyle = materialTint(0.15, 0.45, 0.30, 0.92 - wear * 0.25);
   ctx.lineWidth = Math.max(2, R * 0.024);
   ctx.beginPath();
   ctx.moveTo(-sep, ry + packL);
@@ -4517,7 +4529,7 @@ function drawReel() {
   for (const [x, pack, ang, id] of [[-sep, packL, state.reelAngL, 'reel-scrub-l'],
                                     [sep, packR, state.reelAngR, 'reel-scrub-r']]) {
     ctx.beginPath(); ctx.arc(x, ry, pack, 0, 7);
-    ctx.fillStyle = 'rgba(66,46,32,0.96)'; ctx.fill();
+    ctx.fillStyle = materialTint(0.15, 0.42, 0.24, 0.96); ctx.fill();
     ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 1; ctx.stroke();
 
     ctx.save();
@@ -4553,22 +4565,22 @@ function drawReel() {
     for (const [i, lvl] of [[-1, state.vuL], [1, state.vuR]]) {
       const mx = i * R * 0.46, my = R * 0.66, mw = R * 0.52, mh = R * 0.30;
       roundRect(mx - mw / 2, my - mh / 2, mw, mh, R * 0.015);
-      ctx.fillStyle = 'rgba(238,230,205,0.92)'; ctx.fill();
+      ctx.fillStyle = materialTint(0.55, 0.30, 0.84, 0.92); ctx.fill();
       ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 1; ctx.stroke();
       const px = mx, py = my + mh * 0.34, rr = mh * 0.72;
       ctx.lineWidth = Math.max(1.5, R * 0.01);
       ctx.beginPath(); ctx.arc(px, py, rr, Math.PI * 1.18, Math.PI * 1.72);
-      ctx.strokeStyle = 'rgba(40,36,28,0.75)'; ctx.stroke();
+      ctx.strokeStyle = materialTint(0.55, 0.35, 0.18, 0.78); ctx.stroke();
       ctx.beginPath(); ctx.arc(px, py, rr, Math.PI * 1.72, Math.PI * 1.84);
       ctx.strokeStyle = 'rgba(190,40,30,0.85)'; ctx.stroke();
       const a = Math.PI * (1.18 + clamp(lvl, 0, 1.1) * 0.66);
       ctx.beginPath();
       ctx.moveTo(px, py);
       ctx.lineTo(px + Math.cos(a) * rr * 0.94, py + Math.sin(a) * rr * 0.94);
-      ctx.strokeStyle = 'rgba(30,26,22,0.9)';
+      ctx.strokeStyle = materialTint(0.55, 0.40, 0.14, 0.9);
       ctx.lineWidth = Math.max(1.2, R * 0.008);
       ctx.stroke();
-      ctx.fillStyle = 'rgba(40,36,30,0.9)';
+      ctx.fillStyle = materialTint(0.55, 0.40, 0.16, 0.9);
       ctx.beginPath(); ctx.arc(px, py, R * 0.013, 0, 7); ctx.fill();
     }
   }
