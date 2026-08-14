@@ -78,8 +78,32 @@ Settings live in the unit file (`/etc/systemd/system/prism-downloader.service`):
 | `PRISM_MAX_QUEUE` | `500` | cap on pending jobs |
 | `PRISM_ALLOW_HOSTS` | YouTube hosts | comma-separated suffixes, or `*` |
 
-To rotate the token: `rm /etc/prism/token && systemctl restart prism-downloader`,
-then reconnect in the app.
+## The token
+
+There is one token and it persists — you do not generate a new one per session.
+It is created by `install.sh` on first run and lives at `/etc/prism/token`.
+
+```sh
+cat /etc/prism/token          # read it back any time
+```
+
+Paste it into the app once per browser; it is kept in that browser's
+`localStorage`, so a second device or a different browser needs it pasted
+again. **Sign out** in the YouTube panel clears it from that browser.
+
+To rotate it:
+
+```sh
+./server/install.sh --rotate-token
+```
+
+That writes a fresh secret, restarts the service, and prints the new value.
+Every browser then has to reconnect with it.
+
+Do **not** rotate by deleting the file. The service user can read `/etc/prism`
+but not write to it, so a missing token cannot be recreated on restart and the
+daemon will refuse to start — deliberately, with an explanatory message rather
+than a stack trace.
 
 ## API
 

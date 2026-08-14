@@ -21,6 +21,26 @@ say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 
+newtoken() {
+  # Overwrite in place so ownership and mode survive; the service user can read
+  # /etc/prism but not write to it, so the file must never be removed.
+  mkdir -p "$CONF"
+  python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > "$CONF/token"
+  chown root:prism "$CONF/token" 2>/dev/null || true
+  chmod 640 "$CONF/token"
+}
+
+if [ "${1:-}" = "--rotate-token" ]; then
+  id -u prism >/dev/null 2>&1 || { echo "service is not installed yet — run without arguments first" >&2; exit 1; }
+  newtoken
+  systemctl restart prism-downloader 2>/dev/null || true
+  say "token rotated — every browser must reconnect with the new one:"
+  echo
+  echo "      $(cat "$CONF/token")"
+  echo
+  exit 0
+fi
+
 say "installing python venv tooling and ffmpeg"
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq
@@ -46,9 +66,9 @@ say "yt-dlp $("$VENV/bin/python" -c 'import yt_dlp;print(yt_dlp.version.__versio
 say "creating the API token"
 # Generated here, as root. The service user can read /etc/prism but not write
 # to it, so letting the daemon create this itself would fail on first start.
-if [ ! -s "$CONF/token" ]; then
-  python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > "$CONF/token"
-fi
+# Existing tokens are kept, so re-running the installer does not lock out
+# browsers that are already connected.
+[ -s "$CONF/token" ] || newtoken
 chown root:prism "$CONF/token"
 chmod 640 "$CONF/token"
 
